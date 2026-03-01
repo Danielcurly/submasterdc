@@ -1,46 +1,19 @@
+version: '3.8'
+
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./ollama_data:/root/.ollama
-    shm_size: 4gb            # 限制最大使用4G内存，可根据需求修改或注释
-    networks:
-      - subtitle-network
-    cpuset: "0-4"           # 绑定核心数，可根据需求修改或注释
-    environment:
-      - TZ=Asia/Shanghai  # 添加这行
-    deploy:                # 最多使用核心数，可根据需求修改或注释
-      resources:
-        limits:
-          cpus: '5.0'
-
-  nas-subtitle:
+  submasterdc:
     build: .
-    container_name: nas-submaster
-    restart: unless-stopped
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./data:/data
-      - /your/media/path:/media/movies  # 修改成你自己的媒体库地址
+    image: submasterdc:latest
+    container_name: submasterdc
     environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-    shm_size: 4gb   # 限制最大使用4G内存，可根据需求修改或注释
-    networks:
-      - subtitle-network
-    depends_on:
-      - ollama
-    cpuset: "0-4"  # 绑定核心数，可根据需求修改或注释
-    deploy:         # 最多使用核心数，可根据需求修改或注释
-      resources:
-        limits:
-          cpus: '5.0'
-
-networks:
-  subtitle-network:
-    driver: bridge
+      - PUID=1026
+      - PGID=100
+      - TZ=Europe/Madrid
+    volumes:
+      - /volume1/docker/SubMasterDC/data:/app/data # Bases de datos y configuracion
+      - /volume1/docker/SubMasterDC/logs:/app/logs # Registros de procesamiento
+      - /volume3/Datos:/data1 # Mapeo idéntico a Radarr (Películas)
+      - /volume4/Datos2:/data2 # Mapeo idéntico a Sonarr/Radarr (Series y Películas Asia)
+    ports:
+      - "8086:8000"
+    restart: unless-stopped
