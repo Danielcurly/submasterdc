@@ -218,7 +218,13 @@ class TaskWorker:
                         app_logger.warning(f"Translation disabled, cannot copy extracted {base_lang_norm} to {lang}.srt")
                         return None
                     
-                    success = self._translate_subtitle(task_id, str(base_srt_path), config, lang, str(lang_srt_path))
+                    success = self._translate_subtitle(
+                        task_id=task_id,
+                        srt_path=str(base_srt_path),
+                        target_lang=lang,
+                        config=config,
+                        output_path=str(lang_srt_path)
+                    )
                     if success:
                         return str(lang_srt_path)
                 return None
