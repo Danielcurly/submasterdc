@@ -52,7 +52,7 @@ version: '3.8'
 
 services:
   submasterdc:
-    image: [USER]/submasterdc:v0.1
+    image: ghcr.io/danielcurly/submasterdc:latest
     container_name: submasterdc
     restart: unless-stopped
     ports:
