@@ -17,7 +17,7 @@ export default function HomePage() {
   const [stats, setStats] = useState({ pending: 0, processing: 0, completed: 0, failed: 0 });
   const [scanning, setScanning] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<string | null>(null);
-  const [hideParams, setHideParams] = useState({ completed: false, failed: false, skipped: false, pending: false, cancelled: false });
+  const [hideParams, setHideParams] = useState({ completed: false, failed: false, skipped: false, pending: false, cancelled: false, permission_error: false });
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
   const { t } = useLanguage();
@@ -59,8 +59,10 @@ export default function HomePage() {
       pending: { cls: 'chip-amber', label: t('Pending') },
       completed: { cls: 'chip-green', label: t('Completed') },
       failed: { cls: 'chip-red', label: t('Failed') },
+      permission_error: { cls: 'chip-red', label: t('Permission Error') },
       cancelled: { cls: 'chip-gray', label: t('Cancelled') },
       skipped: { cls: 'chip-blue', label: t('Skipped') },
+      quota_exhausted: { cls: 'chip-red', label: t('Quota Exhausted') },
     };
     const s = map[status] || { cls: 'chip-gray', label: t(status) };
     return (
@@ -75,7 +77,7 @@ export default function HomePage() {
 
   const filteredTasks = tasks.filter(task => {
     if (hideParams.completed && task.status === 'completed') return false;
-    if (hideParams.failed && task.status === 'failed') return false;
+    if (hideParams.failed && (task.status === 'failed' || task.status === 'permission_error' || task.status === 'quota_exhausted')) return false;
     if (hideParams.skipped && task.status === 'skipped') return false;
     if (hideParams.pending && task.status === 'pending') return false;
     if (hideParams.cancelled && task.status === 'cancelled') return false;
@@ -211,6 +213,7 @@ export default function HomePage() {
                   pending: anyVisible,
                   completed: anyVisible,
                   failed: anyVisible,
+                  permission_error: anyVisible,
                   skipped: anyVisible,
                   cancelled: anyVisible
                 });
@@ -238,10 +241,10 @@ export default function HomePage() {
 
             <button
               className="btn btn-ghost btn-sm"
-              onClick={() => setHideParams(p => ({ ...p, failed: !p.failed }))}
-              style={{ padding: '4px 8px', color: hideParams.failed ? 'var(--text-muted)' : 'var(--text-main)', opacity: hideParams.failed ? 0.6 : 1 }}
+              onClick={() => setHideParams(p => ({ ...p, failed: !p.failed, permission_error: !p.permission_error }))}
+              style={{ padding: '4px 8px', color: (hideParams.failed || hideParams.permission_error) ? 'var(--text-muted)' : 'var(--text-main)', opacity: (hideParams.failed || hideParams.permission_error) ? 0.6 : 1 }}
             >
-              {hideParams.failed ? <EyeOff size={14} /> : <Eye size={14} />} {t('Failed')}
+              {(hideParams.failed || hideParams.permission_error) ? <EyeOff size={14} /> : <Eye size={14} />} {t('Failed')}
             </button>
 
             <button
@@ -297,8 +300,8 @@ export default function HomePage() {
                             <XCircle size={14} />
                           </button>
                         )}
-                        {task.status === 'failed' && (
-                          <button className="btn btn-sm btn-icon" onClick={() => retryTask(task.id).then(load)} title={t("Retry")} style={{ padding: 4 }}>
+                        {(task.status === 'failed' || task.status === 'permission_error' || task.status === 'quota_exhausted') && (
+                          <button className="btn btn-sm btn-icon" onClick={() => retryTask(task.id).then(load)} title={t("Retry")} style={{ color: 'var(--accent-amber)', padding: 4 }}>
                             <RotateCcw size={14} />
                           </button>
                         )}

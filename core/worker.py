@@ -16,10 +16,23 @@ from core.models import TaskStatus, TranslationTask
 from core.config import ConfigManager, AppConfig
 from database.connection import wait_for_database, get_db_connection
 from database.task_dao import TaskDAO
-from services.media_scanner import rescan_video_subtitles
+from core.logger import app_logger, LOG_FILE
+from database.media_dao import MediaDAO
+from services.media_scanner import rescan_video_subtitles, scan_media_directory
 from services.whisper_service import WhisperService
 from services.watchdog_service import WatchdogService
-from core.logger import app_logger
+from services.embedded_extractor import (
+    extract_embedded_subtitle, 
+    get_embedded_subtitles_info, 
+    get_audio_language_info,
+    LANGUAGE_MAP,
+    get_video_fps
+)
+from services.subtitle_converter import SubtitleConverter
+from services.translator import TranslationConfig, translate_srt_file
+from utils.lang_detection import detect_language_from_subtitle
+import json
+import traceback
 
 
 class TaskWorker:
@@ -31,6 +44,36 @@ class TaskWorker:
         self.config_manager = ConfigManager(get_db_connection)
         self.last_scan_times = {}
         self.watchdog = WatchdogService(self.config_manager)
+        self.whisper_service: Optional[WhisperService] = None
+    
+    def _cleanup_startup(self):
+        """Cleanup temporary files and logs on startup"""
+        print("[TaskWorker] Initializing startup cleanup...")
+        
+        # 1. Clean data/temp
+        temp_dir = Path("./data/temp")
+        if temp_dir.exists():
+            try:
+                for item in temp_dir.iterdir():
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                    except Exception as e:
+                        print(f"[TaskWorker] Warning: Failed to clean temp item {item}: {e}")
+            except Exception as e:
+                print(f"[TaskWorker] Failed to access temp directory: {e}")
+                
+        # 2. Truncate debug log
+        # 2. Truncate debug log
+        try:
+            if LOG_FILE.exists():
+                with open(LOG_FILE, 'w', encoding='utf-8') as f:
+                    f.write("")
+                print(f"[TaskWorker] Debug log truncated: {LOG_FILE}")
+        except Exception as e:
+            print(f"[TaskWorker] Failed to truncate log file: {e}")
     
     def start(self):
         """Start processor (runs in a separate thread)"""
@@ -44,13 +87,14 @@ class TaskWorker:
             return
         
         print("[TaskWorker] Starting...")
+        self._cleanup_startup()
         self.running = True
         
         # Start watchdog
         self.watchdog.start()
         
         # Start processing loop
-        threading.Thread(target=self._worker_loop, daemon=True).start()
+        threading.Thread(target=self._worker_loop, name="SubtitleWorker", daemon=True).start()
     
     def stop(self):
         """Stop processor"""
@@ -70,7 +114,6 @@ class TaskWorker:
                 
                 # Check for periodic scans
                 current_time = time.time()
-                from services.media_scanner import scan_media_directory
                 for lib in config.libraries:
                     if lib.scan_mode.value == 'periodic':
                         last_scan = self.last_scan_times.get(lib.id, 0)
@@ -88,6 +131,10 @@ class TaskWorker:
                     print(f"[TaskWorker] Processing task {task.id}: {task.file_path}")
                     self._process_task(task, config)
                 else:
+                    # Check for whisper model idle timeout if service exists
+                    if self.whisper_service:
+                        self.whisper_service.check_idle_timeout(600) # 10 minutes
+                    
                     # Sleep when no tasks
                     time.sleep(5)
             
@@ -122,14 +169,14 @@ class TaskWorker:
                 log_msg("File missing", status=TaskStatus.FAILED)
                 return
             
-            from services.embedded_extractor import (
-                extract_embedded_subtitle, 
-                get_embedded_subtitles_info, 
-                get_audio_language_info,
-                LANGUAGE_MAP
-            )
-            from services.subtitle_converter import SubtitleConverter
+            # Check for write permissions in the video directory
+            video_dir = os.path.dirname(os.path.abspath(file_path))
+            if not os.access(video_dir, os.W_OK):
+                log_msg("Permission denied: cannot write to video directory", status=TaskStatus.PERMISSION_ERROR)
+                app_logger.error(f"[{task_id}] Write permission denied for directory: {video_dir}")
+                return
             
+            # Create temp directory for intermediate files
             # Create temp directory for intermediate files
             temp_dir = Path('./data/temp') / f'task_{task_id}'
             temp_dir.mkdir(parents=True, exist_ok=True)
@@ -184,7 +231,6 @@ class TaskWorker:
                     return str(lang_srt_path)
                 
                 if extract_embedded_subtitle(file_path, lang, str(lang_srt_path)):
-                    from utils.lang_detection import detect_language_from_subtitle
                     detected = detect_language_from_subtitle(str(lang_srt_path))
                     
                     base_detected = detected
@@ -203,7 +249,6 @@ class TaskWorker:
                         return str(lang_srt_path)
                 
                 if ensure_base_srt():
-                    from utils.lang_detection import detect_language_from_subtitle
                     base_detected = detect_language_from_subtitle(str(base_srt_path))
                     base_lang_norm = base_detected
                     if base_detected in ['chs', 'cht']: base_lang_norm = 'zh'
@@ -233,23 +278,20 @@ class TaskWorker:
             is_manual_override = False
             
             # Check for manual overrides stored in the task
-            if getattr(task, 'params', None):
-                import json
-                try:
-                    params_dict = json.loads(task.params)
-                    if 'target_language' in params_dict:
-                        task_item = TranslationTask.from_dict(params_dict)
-                        tasks = [task_item]
-                        is_manual_override = True
-                        log_msg(f"Manual override detected: {task_item.target_language}")
-                except Exception as e:
-                    print(f"[TaskWorker] Error parsing task parameters: {e}")
+            try:
+                params_dict = json.loads(task.params)
+                if 'target_language' in params_dict:
+                    task_item = TranslationTask.from_dict(params_dict)
+                    tasks = [task_item]
+                    is_manual_override = True
+                    log_msg(f"Manual override detected: {task_item.target_language}")
+            except Exception as e:
+                print(f"[TaskWorker] Error parsing task parameters: {e}")
             
             if not tasks:
                 log_msg("No translation tasks defined, skipping", status=TaskStatus.SKIPPED, progress=100)
                 return
                 
-            from database.media_dao import MediaDAO
             media_info = MediaDAO.get_media_by_path(file_path)
             existing_subs = media_info.subtitles if media_info else []
             subs_lookup = {Path(s.path).name: s for s in existing_subs}
@@ -274,9 +316,11 @@ class TaskWorker:
                 
                 ass_path = Path(file_path).parent / f"{Path(file_path).stem}.{code}.ass"
                 srt_path = Path(file_path).parent / f"{Path(file_path).stem}.{code}.srt"
+                vtt_path = Path(file_path).parent / f"{Path(file_path).stem}.{code}.vtt"
+                sub_path = Path(file_path).parent / f"{Path(file_path).stem}.{code}.sub"
 
                 skip = False
-                for target_path in [ass_path, srt_path]:
+                for target_path in [ass_path, srt_path, vtt_path, sub_path]:
                     if target_path.exists() and target_path.suffix.lstrip('.') in config.export.formats:
                         filename = target_path.name
                         if filename in subs_lookup:
@@ -367,6 +411,15 @@ class TaskWorker:
                             shutil.copy(primary_srt, str(srt_path))
                             log_msg(f"Generated single SRT ({code})")
                             generated_subs_this_run.append((srt_path.name, task_item))
+                        elif ext == 'vtt':
+                            SubtitleConverter.convert_file(primary_srt, 'vtt', str(vtt_path))
+                            log_msg(f"Generated single VTT ({code})")
+                            generated_subs_this_run.append((vtt_path.name, task_item))
+                        elif ext == 'sub':
+                            fps = get_video_fps(file_path)
+                            SubtitleConverter.convert_file(primary_srt, 'sub', str(sub_path), fps=fps)
+                            log_msg(f"Generated single SUB ({code}, {fps:.2f} fps)")
+                            generated_subs_this_run.append((sub_path.name, task_item))
             
             if any_success and not is_cancelled():
                 if all_skipped and skip_reasons:
@@ -377,12 +430,9 @@ class TaskWorker:
             elif not is_cancelled():
                 log_msg("Failed to generate subtitles", status=TaskStatus.FAILED, progress=100)
             
-            if not is_cancelled():
-               rescan_video_subtitles(file_path)
-            
             # Post-process DB to save rules on freshly generated files
-            if generated_subs_this_run:
-                media_info = MediaDAO.get_media_by_path(file_path)
+            if generated_subs_this_run and any_success and not is_cancelled():
+                # media_info is already fetched above (at line 290)
                 if media_info:
                     for db_sub in media_info.subtitles:
                         fname = Path(db_sub.path).name
@@ -393,16 +443,17 @@ class TaskWorker:
                                 db_sub.primary_lang = getattr(g_task, 'target_language', None)
                                 db_sub.secondary_lang = getattr(g_task, 'secondary_language', None) if db_sub.is_bilingual else None
                     MediaDAO.update_media_subtitles(file_path, media_info.subtitles, media_info.has_translated)
+                
+                # Final rescan to ensure all files are in DB
+                rescan_video_subtitles(file_path)
             
         except Exception as e:
-            import traceback
             tb = traceback.format_exc()
             print(f"[TaskWorker] Task {task_id} failed: {e}\n{tb}")
             app_logger.error(f"[{task_id}] Exception: {e}\n{tb}")
-            TaskDAO.update_task(task_id, status=TaskStatus.FAILED, log=f"Exception: {str(e)[:100]}")
-            
-            if "QUOTA_EXHAUSTED" in str(e):
-                app_logger.error(f"[{task_id}] ALL AI QUOTAS EXHAUSTED. CANCELLING ENTIRE QUEUE.")
+            if "DAILY_LIMIT_REACHED" in str(e) or "QUOTA_EXHAUSTED" in str(e):
+                app_logger.error(f"[{task_id}] DAILY AI QUOTA EXHAUSTED. CANCELLING ENTIRE QUEUE.")
+                TaskDAO.update_task(task_id, status=TaskStatus.QUOTA_EXHAUSTED, log=f"Quota exhausted: {str(e)}")
                 TaskDAO.cancel_all_tasks()
         finally:
             # Always cleanup temp directory
@@ -421,11 +472,20 @@ class TaskWorker:
         try:
             if log_callback: log_callback("Loading Whisper...", progress=5)
             vad_params = config.get_vad_parameters()
-            whisper = WhisperService(config.whisper, vad_params)
+            
+            # Use persistent whisper service
+            if self.whisper_service is None:
+                self.whisper_service = WhisperService(config.whisper, vad_params)
+            else:
+                # Update config in case it changed
+                self.whisper_service.config = config.whisper
+                self.whisper_service.vad_params = vad_params
+                
             def progress_callback(current, total, message):
                 if log_callback: log_callback(message, progress=current)
                 else: TaskDAO.update_task(task_id, progress=current, log=message)
-            whisper.extract_subtitle(file_path, str(srt_path), progress_callback, is_cancelled)
+            
+            self.whisper_service.extract_subtitle(file_path, str(srt_path), progress_callback, is_cancelled)
             return str(srt_path)
         except InterruptedError:
             if log_callback: log_callback("Whisper extraction cancelled")
@@ -443,11 +503,8 @@ class TaskWorker:
         output_path: Optional[str] = None
     ) -> bool:
         """Translate subtitles via LLM"""
-        from database.task_dao import TaskDAO
-        import os
         TaskDAO.update_task(task_id, progress=50, log="Translating...")
         try:
-            from services.translator import TranslationConfig, translate_srt_file
             provider_cfg = config.get_current_provider_config()
             trans_config = TranslationConfig(
                 api_key=provider_cfg.api_key,
@@ -455,8 +512,15 @@ class TaskWorker:
                 model_name=provider_cfg.model_name,
                 target_language=target_lang,
                 source_language=config.whisper.source_language,
-                max_lines_per_batch=config.translation.max_lines_per_batch
+                max_lines_per_batch=config.translation.max_lines_per_batch,
+                max_daily_calls=config.translation.max_daily_calls
             )
+            
+            usage_callbacks = (
+                self.config_manager.get_daily_usage,
+                self.config_manager.increment_daily_usage
+            )
+
             def pcb(current, total, message):
                 TaskDAO.update_task(task_id, progress=50 + int((current/total)*45), log=message)
             
@@ -469,7 +533,8 @@ class TaskWorker:
                 trans_config, 
                 output_path, 
                 progress_callback=pcb, 
-                is_cancelled=is_cancelled_cb
+                is_cancelled=is_cancelled_cb,
+                usage_callbacks=usage_callbacks
             )
             if not success:
                # If cancelled, translate_srt_file might return False. Check again.
@@ -478,7 +543,8 @@ class TaskWorker:
                    return False
                    
                TaskDAO.update_task(task_id, log=f"Trans fail: {msg}")
-               if "QUOTA_EXHAUSTED" in msg:
+               if "QUOTA_EXHAUSTED" in msg or "DAILY_LIMIT_REACHED" in msg:
+                   # Specific error to be caught by _process_task
                    raise Exception(msg)
             return success
         except Exception as e:

@@ -16,7 +16,8 @@ from utils.lang_detection import detect_language_combined
 
 
 # Default media root directory
-MEDIA_ROOT = "./media"
+# Resolve MEDIA_ROOT to absolute path to avoid ambiguity in Docker/different CWDs
+MEDIA_ROOT = os.path.abspath(os.getenv("MEDIA_ROOT", "/media" if os.name != 'nt' else "./media"))
 
 
 class MediaScanner:
@@ -257,7 +258,8 @@ class MediaScanner:
 def scan_media_directory(
     directory: Optional[str] = None,
     subdirectory: Optional[str] = None,
-    debug: bool = False
+    debug: bool = False,
+    force_failed_retry: bool = False
 ) -> Tuple[int, List[str]]:
     """
     Scan media directory (quick function)
@@ -324,7 +326,7 @@ def scan_media_directory(
     for p in all_found_paths:
         # Ensure path is absolute and normalized
         abs_p = os.path.abspath(p)
-        TaskDAO.add_task(abs_p, config_sig)
+        TaskDAO.add_task(abs_p, config_sig, force_failed_retry=force_failed_retry)
             
     return total_cnt, all_logs
 

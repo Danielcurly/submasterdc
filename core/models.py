@@ -22,6 +22,8 @@ class TaskStatus(Enum):
     FAILED = 'failed'
     CANCELLED = 'cancelled'
     SKIPPED = 'skipped'
+    QUOTA_EXHAUSTED = 'quota_exhausted'
+    PERMISSION_ERROR = 'permission_error'
 
 
 class ScanMode(Enum):
@@ -83,23 +85,26 @@ class SubtitleInfo:
 
 @dataclass
 class SubtitleEntry:
-    """General subtitle entry"""
-    index: str
-    timecode: str
+    """General subtitle entry with millisecond precision"""
+    index: int
+    start_ms: int
+    end_ms: int
     text: str
-    
+
     def to_dict(self) -> Dict:
         return {
             'index': self.index,
-            'timecode': self.timecode,
+            'start_ms': self.start_ms,
+            'end_ms': self.end_ms,
             'text': self.text
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict) -> 'SubtitleEntry':
         return cls(
-            index=str(data.get('index', '1')),
-            timecode=str(data.get('timecode', '00:00:00,000 --> 00:00:01,000')),
+            index=int(data.get('index', 1)),
+            start_ms=int(data.get('start_ms', 0)),
+            end_ms=int(data.get('end_ms', 0)),
             text=str(data.get('text', ''))
         )
 
@@ -238,6 +243,7 @@ class TranslationConfig:
     enabled: bool = False
     tasks: List[TranslationTask] = field(default_factory=list)
     max_lines_per_batch: int = 500
+    max_daily_calls: int = 0         # 0 = unlimited
     max_retries: int = 3
     timeout: int = 180
     
@@ -246,9 +252,21 @@ class TranslationConfig:
             'enabled': self.enabled,
             'tasks': [t.to_dict() for t in self.tasks],
             'max_lines_per_batch': self.max_lines_per_batch,
+            'max_daily_calls': self.max_daily_calls,
             'max_retries': self.max_retries,
             'timeout': self.timeout
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'TranslationConfig':
+        return cls(
+            enabled=data.get('enabled', False),
+            tasks=[TranslationTask.from_dict(t) for t in data.get('tasks', [])],
+            max_lines_per_batch=data.get('max_lines_per_batch', 500),
+            max_daily_calls=data.get('max_daily_calls', 0),
+            max_retries=data.get('max_retries', 3),
+            timeout=data.get('timeout', 180)
+        )
 
 
 @dataclass
@@ -265,9 +283,9 @@ class ExportConfig:
         formats_data = data.get('formats', ['srt', 'ass'])
         if not isinstance(formats_data, list):
             formats_data = ['srt', 'ass']
-        formats: List[str] = [str(f) for f in formats_data if str(f) in ['srt', 'ass']]
-        if not formats:
-            formats = ['ass']
+        formats: List[str] = [str(f) for f in formats_data]
+        if not all(f.lower() in ['srt', 'ass', 'vtt', 'sub'] for f in formats):
+            return cls(formats=['srt', 'ass'])
         return cls(formats=formats)
 
 

@@ -16,13 +16,14 @@ class TaskDAO:
     """Task Data Access Object"""
     
     @staticmethod
-    def add_task(file_path: str, params: Optional[str] = None) -> Tuple[bool, str]:
+    def add_task(file_path: str, params: Optional[str] = None, force_failed_retry: bool = False) -> Tuple[bool, str]:
         """
         Add a new task
         
         Args:
             file_path: File path
             params: Optional manual task parameters as JSON string
+            force_failed_retry: Whether to force re-queuing of failed/cancelled tasks
         
         Returns:
             (Success flag, Message)
@@ -37,6 +38,7 @@ class TaskDAO:
                 task_id, status, stored_params = result
                 if status == 'processing':
                     return False, "Task is already being processed"
+                
                 if status in ('completed', 'skipped'):
                     # If config hasn't changed since last run, skip silently
                     if stored_params == params or params is None:
@@ -50,7 +52,11 @@ class TaskDAO:
                     conn.commit()
                     return True, "Task re-queued (config changed)"
                 
-                # Update existing task to pending (for failed/cancelled/pending)
+                if status in ('failed', 'cancelled', 'quota_exhausted') and not force_failed_retry:
+                    # Don't re-queue failed tasks during automatic scans
+                    return False, f"Task is {status}, skipping automatic re-queuing"
+                
+                # Update existing task to pending
                 conn.execute(
                     "UPDATE tasks SET status = 'pending', progress = 0, log = 'Preparing (Rescan)...', "
                     "params = ?, hidden = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",

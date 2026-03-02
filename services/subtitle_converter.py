@@ -10,19 +10,9 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from datetime import timedelta
+from core.models import SubtitleEntry
 
 
-@dataclass
-class SubtitleEntry:
-    """General subtitle entry"""
-    index: int
-    start_ms: int  # Start time in ms
-    end_ms: int    # End time in ms
-    text: str
-    
-    def duration_ms(self) -> int:
-        """Get duration in ms"""
-        return self.end_ms - self.start_ms
 
 
 class SubtitleConverter:
@@ -88,27 +78,37 @@ class SubtitleConverter:
     
     @staticmethod
     def parse_srt(content: str) -> List[SubtitleEntry]:
-        """Parse SRT format"""
+        """
+        Parse SRT format using robust regex-based logic.
+        Handles diverse line endings, spacing, and malformed blocks.
+        """
         entries = []
-        blocks = content.strip().split('\n\n')
+        # Normalise line endings and split into potential blocks
+        # We look for digits followed by a timecode line
+        # Regex to match: Index \n Time --> Time \n Text
+        pattern = re.compile(
+            r'(\d+)\s*\n'                          # Index
+            r'(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s*-->\s*' # Start time
+            r'(\d{2}:\d{2}:\d{2}[,. ]\d{3})\s*\n'     # End time
+            r'(.*?(?=\n\s*\n\d+\s*\n\d{2}:\d{2}:|\Z))', # Text (non-greedy until next block or end)
+            re.DOTALL
+        )
         
-        for block in blocks:
-            lines = block.strip().split('\n')
-            if len(lines) < 3:
-                continue
-            
+        for match in pattern.finditer(content):
             try:
-                index = int(lines[0].strip())
-                timecode = lines[1].strip()
-                text = '\n'.join(lines[2:]).strip()
+                index = int(match.group(1))
+                start_str = match.group(2).replace('.', ',').replace(' ', ',')
+                end_str = match.group(3).replace('.', ',').replace(' ', ',')
+                text = match.group(4).strip()
                 
-                # Parse timeline
-                match = re.match(r'([\d:,]+)\s*-->\s*([\d:,]+)', timecode)
-                if not match:
-                    continue
+                # Use a slightly more flexible time parser for the internal parts
+                def flex_parse_time(ts):
+                    h, m, s = ts.split(':')
+                    s, ms = s.split(',')
+                    return (int(h) * 3600 + int(m) * 60 + int(s)) * 1000 + int(ms)
                 
-                start_ms = SubtitleConverter.parse_srt_time(match.group(1))
-                end_ms = SubtitleConverter.parse_srt_time(match.group(2))
+                start_ms = flex_parse_time(start_str)
+                end_ms = flex_parse_time(end_str)
                 
                 entries.append(SubtitleEntry(
                     index=index,
@@ -116,7 +116,7 @@ class SubtitleConverter:
                     end_ms=end_ms,
                     text=text
                 ))
-            except (ValueError, IndexError):
+            except Exception:
                 continue
         
         return entries
@@ -133,15 +133,24 @@ class SubtitleConverter:
         """
         lines = []
         for entry in entries:
+            if not entry.text.strip():
+                continue
             start = SubtitleConverter.format_srt_time(entry.start_ms)
             end = SubtitleConverter.format_srt_time(entry.end_ms)
             
             lines.append(f"{entry.index}")
             lines.append(f"{start} --> {end}")
-            lines.append(entry.text)
+            lines.append(entry.text.strip())
             lines.append("")  # Empty line separator
         
         return '\n'.join(lines)
+
+    @staticmethod
+    def save_srt(entries: List[SubtitleEntry], output_path: str):
+        """Save entries to an SRT file using shared logic"""
+        content = SubtitleConverter.to_srt(entries)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(content)
     
     @staticmethod
     def to_vtt(entries: List[SubtitleEntry]) -> str:
@@ -252,16 +261,15 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return '\n'.join(lines)
     
     @staticmethod
-    def to_sub(entries: List[SubtitleEntry]) -> str:
+    def to_sub(entries: List[SubtitleEntry], fps: float = 25.0) -> str:
         """
         Convert to SUB (MicroDVD) format
         
         Example:
         {100}{200}Hello, world!
         
-        Note: SUB uses frames instead of time, assuming 25fps here
+        Note: SUB uses frames instead of time, uses provided FPS (default 25)
         """
-        fps = 25  # Assume 25 frames per second
         lines = []
         
         for entry in entries:
@@ -278,7 +286,8 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     @staticmethod
     def convert_file(input_path: str, 
                     output_format: str,
-                    output_path: Optional[str] = None) -> str:
+                    output_path: Optional[str] = None,
+                    fps: float = 25.0) -> str:
         """
         Convert subtitle file format
         """
@@ -303,7 +312,7 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         elif output_format == 'ssa':
             output_content = SubtitleConverter.to_ssa(entries)
         elif output_format == 'sub':
-            output_content = SubtitleConverter.to_sub(entries)
+            output_content = SubtitleConverter.to_sub(entries, fps=fps)
         else:
             raise ValueError(f"Unsupported format: {output_format}")
         
@@ -349,13 +358,32 @@ Style: Eng,Microsoft YaHei,11,&H00027CCF,&H00000000,&H00000000,&H00000000,-1,0,0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"""
 
         lines = [header]
-        sec_map = {e.index: e.text.replace('\\n', ' ').replace('\n', ' ') for e in s_entries}
+        
+        # Time-based mapping for better alignment (handles missing/extra lines)
+        s_idx = 0
+        num_s = len(s_entries)
         
         for p in p_entries:
             start = SubtitleConverter.format_ass_time(p.start_ms)
             end = SubtitleConverter.format_ass_time(p.end_ms)
             p_text = p.text.replace('\n', '\\N')
-            s_text = sec_map.get(p.index, "")
+            
+            # Find best matching secondary entry by time
+            s_text = ""
+            # Since both are sorted, we can use a small window
+            best_diff = 1000 # 1 second tolerance
+            
+            # Start from current index and look ahead/behind slightly
+            st = max(0, s_idx - 5)
+            en = min(num_s, s_idx + 10)
+            
+            for i in range(st, en):
+                s = s_entries[i]
+                diff = abs(s.start_ms - p.start_ms)
+                if diff < best_diff:
+                    best_diff = diff
+                    s_text = s.text.replace('\\n', ' ').replace('\n', ' ')
+                    s_idx = i # Update pointer for next iteration optimization
             
             if s_text:
                 text = f"{p_text}\\N{{\\rEng}}{s_text}"
@@ -377,14 +405,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
             
         p_entries = SubtitleConverter.parse_srt(p_content)
         s_entries = SubtitleConverter.parse_srt(s_content)
-        sec_map = {e.index: e.text.replace('\\n', ' ').replace('\n', ' ') for e in s_entries}
-        
         lines = []
+        s_idx = 0
+        num_s = len(s_entries)
+        
         for p in p_entries:
             start = SubtitleConverter.format_srt_time(p.start_ms)
             end = SubtitleConverter.format_srt_time(p.end_ms)
             p_text = p.text
-            s_text = sec_map.get(p.index, "")
+            
+            # Time-based mapping
+            s_text = ""
+            best_diff = 1000
+            st = max(0, s_idx - 5)
+            en = min(num_s, s_idx + 10)
+            
+            for i in range(st, en):
+                s = s_entries[i]
+                diff = abs(s.start_ms - p.start_ms)
+                if diff < best_diff:
+                    best_diff = diff
+                    s_text = s.text.replace('\\n', ' ').replace('\n', ' ')
+                    s_idx = i
             
             lines.append(f"{p.index}")
             lines.append(f"{start} --> {end}")

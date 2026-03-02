@@ -8,10 +8,11 @@ Responsible for extracting subtitles from video
 from pathlib import Path
 from typing import Optional, Callable
 import subprocess
+import time
 import numpy as np
 from faster_whisper import WhisperModel
 
-from core.models import WhisperConfig, VADParameters
+from core.models import WhisperConfig, VADParameters, SubtitleEntry
 from utils.format_utils import format_timestamp
 
 
@@ -36,6 +37,7 @@ class WhisperService:
         self.vad_params = vad_params
         self.model_dir = model_dir
         self.model: Optional[WhisperModel] = None
+        self.last_activity_time = time.time()
     
     def load_model(self):
         """Load Whisper model"""
@@ -51,6 +53,7 @@ class WhisperService:
                 download_root=self.model_dir
             )
             print(f"[WhisperService] Model loaded: {self.config.model_size} (CPU threads: {self.config.cpu_threads})")
+            self.last_activity_time = time.time()
         except Exception as e:
             print(f"[WhisperService] Failed to load model: {e}")
             raise
@@ -113,6 +116,7 @@ class WhisperService:
         # Ensure model is loaded
         if self.model is None:
             self.load_model()
+        self.last_activity_time = time.time()
         
         # Determine output path
         if output_path is None:
@@ -182,39 +186,51 @@ class WhisperService:
             # Execute transcription
             segments, info = self.model.transcribe(**transcribe_params)
             
-            # info.language will be the same as winner if we set it
+            # Collect entries
+            entries = []
+            idx = 0
+            for seg in segments:
+                if is_cancelled and is_cancelled():
+                    raise InterruptedError("Whisper extraction cancelled by user")
+                
+                idx += 1
+                entries.append(SubtitleEntry(
+                    index=idx,
+                    start_ms=int(seg.start * 1000),
+                    end_ms=int(seg.end * 1000),
+                    text=seg.text.strip()
+                ))
+                
+                # Update progress
+                if progress_callback and idx % 10 == 0:
+                    progress = 15 + min(35, int(idx / 300 * 35))
+                    progress_callback(progress, 100, f"Transcribed {idx} lines")
             
-            # Write SRT file
-            with open(output_path, 'w', encoding='utf-8') as f:
-                idx = 0
-                for seg in segments:
-                    if is_cancelled and is_cancelled():
-                        raise InterruptedError("Whisper extraction cancelled by user")
-                        
-                    idx += 1
-                    
-                    # Write subtitle entry
-                    f.write(f"{idx}\n")
-                    f.write(
-                        f"{format_timestamp(seg.start)} --> "
-                        f"{format_timestamp(seg.end)}\n"
-                    )
-                    f.write(f"{seg.text.strip()}\n\n")
-                    
-                    # Update progress
-                    if progress_callback and idx % 10 == 0:
-                        progress = 15 + min(35, int(idx / 300 * 35))
-                        progress_callback(progress, 100, f"Transcribed {idx} lines")
+            # Save using centralized logic
+            from services.subtitle_converter import SubtitleConverter
+            SubtitleConverter.save_srt(entries, output_path)
             
             # Complete
             if progress_callback:
                 progress_callback(50, 100, f"Subtitle extraction complete ({idx} lines)")
             
+            self.last_activity_time = time.time()
             return output_path
         
         except Exception as e:
             print(f"[WhisperService] Extraction failed: {e}")
+            self.last_activity_time = time.time()
             raise
+    
+    def check_idle_timeout(self, timeout_seconds: int = 600):
+        """Check if model has been idle and unload if necessary"""
+        if self.model is None:
+            return
+            
+        idle_time = time.time() - self.last_activity_time
+        if idle_time > timeout_seconds:
+            print(f"[WhisperService] Model idle for {int(idle_time)}s, unloading to free memory...")
+            self.unload_model()
     
     def unload_model(self):
         """Unload model (free memory)"""

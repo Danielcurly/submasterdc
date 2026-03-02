@@ -9,10 +9,8 @@ def _find_exe(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
-    # Known fallback locations on this Windows machine
-    fallbacks = [
-        f"C:/Users/danie/MiniConda3/envs/faceswap/Library/bin/{name}.exe",
-    ]
+    # Generic fallbacks if not in PATH (environment specific ones removed for portability)
+    fallbacks = [] 
     for fb in fallbacks:
         if Path(fb).exists():
             return fb
@@ -81,7 +79,7 @@ def get_embedded_subtitles_info(file_path: str) -> list:
         FFPROBE_PATH,
         "-v", "error",
         "-select_streams", "s",
-        "-show_entries", "stream=index:stream_tags=language",
+        "-show_entries", "stream=index,codec_name:stream_tags=language",
         "-of", "json",
         file_path
     ]
@@ -102,11 +100,18 @@ def extract_embedded_subtitle(file_path: str, target_lang: str, output_path: str
     target_stream_index = None
     allowed_lang_codes = LANGUAGE_MAP.get(target_lang.lower(), [target_lang.lower()])
     
+    # Text-based subtitle codecs that we can extract directly to SRT
+    TEXT_CODECS = ['subrip', 'ass', 'mov_text', 'webvtt', 'text']
+    
     for stream in streams:
         tags = stream.get("tags", {})
         language = tags.get("language", "").lower()
+        codec = stream.get("codec_name", "").lower()
         
         if language in allowed_lang_codes:
+            if codec not in TEXT_CODECS:
+                app_logger.info(f"[EmbeddedExtractor] Skipping track {stream.get('index')} (codec: {codec}) as it is not text-based.")
+                continue
             target_stream_index = stream.get("index")
             break
             
@@ -136,3 +141,24 @@ def extract_embedded_subtitle(file_path: str, target_lang: str, output_path: str
     except Exception as e:
         app_logger.error(f"[EmbeddedExtractor] Failed to extract subtitle track {target_stream_index}: {e}")
         return False
+
+
+def get_video_fps(file_path: str) -> float:
+    """Uses ffprobe to get video FPS"""
+    cmd = [
+        FFPROBE_PATH,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=False)
+        rate_str = result.stdout.strip()
+        if '/' in rate_str:
+            num, den = map(int, rate_str.split('/'))
+            return num / den if den != 0 else 25.0
+        return float(rate_str) if rate_str else 25.0
+    except Exception:
+        return 25.0

@@ -24,6 +24,7 @@ export default function AIConfigPage() {
     const [testing, setTesting] = useState(false);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState('');
+    const [maxDailyCalls, setMaxDailyCalls] = useState(0);
     const { t } = useLanguage();
 
     useEffect(() => {
@@ -36,6 +37,7 @@ export default function AIConfigPage() {
             setWhisperModel(cfg.whisper?.model_size || 'base');
             setWhisperThreads(cfg.whisper?.cpu_threads || 4);
             setSourceLang(cfg.whisper?.source_language || 'auto');
+            setMaxDailyCalls(cfg.translation?.max_daily_calls || 0);
             const pc = cfg.provider_configs?.[prov];
             if (pc) { setApiKey(pc.api_key || ''); setBaseUrl(pc.base_url || provs[prov]?.base_url || ''); setModelName(pc.model_name || provs[prov]?.model || ''); }
             else if (provs[prov]) { setApiKey(''); setBaseUrl(provs[prov].base_url || ''); setModelName(provs[prov].model || ''); }
@@ -64,7 +66,8 @@ export default function AIConfigPage() {
                 ...config,
                 current_provider: selectedProvider,
                 provider_configs: { ...config.provider_configs, [selectedProvider]: { api_key: apiKey, base_url: baseUrl, model_name: modelName } },
-                whisper: { ...config.whisper, model_size: whisperModel, cpu_threads: whisperThreads, source_language: sourceLang, content_type: selectedContentType }
+                whisper: { ...config.whisper, model_size: whisperModel, cpu_threads: whisperThreads, source_language: sourceLang, content_type: selectedContentType },
+                translation: { ...config.translation, max_daily_calls: maxDailyCalls }
             });
             setMessage(t('Configuration saved!'));
             setTimeout(() => setMessage(''), 3000);
@@ -155,6 +158,31 @@ export default function AIConfigPage() {
                                 {testResult.message}
                             </span>
                         )}
+                    </div>
+                </div>
+
+                <div className="section-header" style={{ marginTop: 24 }}>
+                    <div className="section-title">
+                        <Save size={18} className="section-title-icon" />
+                        <h2>{t('Usage Limits')}</h2>
+                    </div>
+                </div>
+                <div className="card">
+                    <div className="form-group">
+                        <label className="form-label">{t('Daily AI Call Limit')}</label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <input
+                                type="number"
+                                className="form-input"
+                                style={{ width: 120 }}
+                                value={maxDailyCalls}
+                                onChange={e => setMaxDailyCalls(parseInt(e.target.value) || 0)}
+                                min="0"
+                            />
+                            <p className="text-caption" style={{ margin: 0 }}>
+                                {t('0 = Unlimited. Hard cap on daily AI translation requests to avoid unexpected costs.')}
+                            </p>
+                        </div>
                     </div>
                 </div>
             </div>

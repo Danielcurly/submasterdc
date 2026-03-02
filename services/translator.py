@@ -11,10 +11,12 @@ Main improvements:
 
 import json
 import time
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Callable
 from pathlib import Path
 from openai import OpenAI
-from dataclasses import dataclass
+from core.models import SubtitleEntry
+from services.subtitle_converter import SubtitleConverter
 
 
 @dataclass
@@ -28,29 +30,9 @@ class TranslationConfig:
     max_lines_per_batch: int = 500  # Maximum lines per translation batch
     max_retries: int = 3
     timeout: int = 180
+    max_daily_calls: int = 0  # 0 means unlimited
 
 
-class SubtitleEntry:
-    """Subtitle entry"""
-    def __init__(self, index: str, timecode: str, text: str):
-        self.index = index
-        self.timecode = timecode
-        self.text = text
-    
-    def to_dict(self) -> Dict:
-        return {
-            'index': self.index,
-            'timecode': self.timecode,
-            'text': self.text
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'SubtitleEntry':
-        return cls(
-            index=str(data.get('index', '1')),
-            timecode=str(data.get('timecode', '00:00:00,000 --> 00:00:01,000')),
-            text=str(data.get('text', ''))
-        )
 
 
 class TranslationError(Exception):
@@ -83,16 +65,19 @@ class SubtitleTranslator:
         'es': 'Spanish'
     }
     
-    def __init__(self, config: TranslationConfig, progress_callback=None):
+    def __init__(self, config: TranslationConfig, progress_callback=None, usage_callbacks: Optional[Tuple[Callable[[], int], Callable[[], None]]] = None):
         """
         Initialize translator
         
         Args:
-            config: Translation configuration
-            progress_callback: Progress callback function (current, total, message)
+            config: TranslationConfig
+            progress_callback: progress callback
+            usage_callbacks: tuple of (get_usage, increment_usage) functions
         """
         self.config = config
         self.progress_callback = progress_callback
+        self.usage_callbacks = usage_callbacks
+        self.client: Optional[OpenAI] = None
         self.total_errors = 0
         self.MAX_TOTAL_ERRORS = 10  # Maximum errors allowed for a single task
         
@@ -233,19 +218,25 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
             if bracket_pos > 0:
                 response = response[bracket_pos:]
         
-        # Check for abbreviation symbols "..."
-        if '...' in response and '"...' not in response:
-            # If ... appears outside of strings (indicating ellipsis), AI returned a truncated format
-            raise ParseError(
-                f"AI returned truncated format (contains ...), {expected_count} requested translations not fully returned."
-                "This usually happens because content is too long for the model - please lower max_lines_per_batch setting."
-            )
+        # Robust truncation check: Try to find a valid JSON array even if there is trailing garbage
+        # or if AI added puntos suspensivos inside strings (which is fine)
+        # We check for a trailing ] and then try to parse.
         
-        # Try to parse JSON
+        if not response.endswith(']') and ']' in response:
+            # Try to trim trailing text after the last ]
+            last_bracket = response.rfind(']')
+            response = response[:last_bracket+1]
+
+        # Try to parse JSON first. If it fails, then we check for truncation.
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
-            # Try to fix common JSON issues
+            # If JSON is invalid AND contains ..., it's likely truncated
+            if '...' in response and '"...' not in response:
+                 raise ParseError(
+                    f"AI returned truncated format (contains ...), {expected_count} requested translations not fully returned."
+                )
+            # Otherwise try the legacy fixes...
             
             # Try 1: Remove trailing comma (if any)
             if response.rstrip().endswith(',]'):
@@ -256,7 +247,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     pass
             
             # Try 2: Check for missing closing bracket
-            if not response.rstrip().endswith(']'):
+            if 'data' not in locals() and not response.rstrip().endswith(']'):
                 response = response.rstrip() + ']'
                 try:
                     data = json.loads(response)
@@ -314,9 +305,12 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
         if is_cancelled and is_cancelled():
             raise TranslationError("Translation cancelled by user")
             
-        # Intelligent degradation: if batch is too large causing truncations, split in 2
-        if len(entries) > 100 and retry_count >= 2:
-            print(f"[Intelligent Split] Batch too large ({len(entries)} lines), splitting into 2 sub-batches")
+        # Intelligent degradation: if batch causes truncations, split in 2
+        # Reduced threshold to handle smaller batches that still truncate
+        if len(entries) > 1 and retry_count >= 2:
+            print(f"[Intelligent Split] Splitting batch of {len(entries)} lines into smaller segments")
+            if retry_count > 200: # Safety guard
+                raise TranslationError("Max recursion depth reached in translation split")
             mid = len(entries) // 2
             batch1 = self._translate_batch(entries[:mid], context_before, entries[mid].text, 0, is_cancelled)
             batch2 = self._translate_batch(entries[mid:], entries[mid-1].text, context_after, 0, is_cancelled)
@@ -333,12 +327,24 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                 
             for attempt in range(self.config.max_retries):
                 try:
+                    # Daily Quota Check
+                    if self.usage_callbacks:
+                        get_usage, increment_usage = self.usage_callbacks
+                        if self.config.max_daily_calls > 0:
+                            current_usage = get_usage()
+                            if current_usage >= self.config.max_daily_calls:
+                                raise TranslationError(f"DAILY_LIMIT_REACHED: Daily cap of {self.config.max_daily_calls} calls hit.")
+
                     response = self.client.chat.completions.create(
                         model=self.config.model_name,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.3,
                         timeout=self.config.timeout
                     )
+                    
+                    # If we got here, a call was made
+                    if self.usage_callbacks:
+                        self.usage_callbacks[1]() # increment_usage
                     
                     raw_response = response.choices[0].message.content
                     if raw_response is None:
@@ -349,13 +355,13 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     raw_response = raw_response.strip()
                     translations = self._parse_translation_response(raw_response, len(entries))
                     
-                    # Build translated subtitle entries
                     translated_entries = []
                     for entry, translation in zip(entries, translations):
                         translated_entries.append(
                             SubtitleEntry(
                                 index=entry.index,
-                                timecode=entry.timecode,
+                                start_ms=entry.start_ms,
+                                end_ms=entry.end_ms,
                                 text=translation
                             )
                         )
@@ -368,7 +374,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     error_msg = str(e)
                     
                     # Check for truncated output
-                    if "..." in error_msg:
+                    if "truncated format" in error_msg: # Specific check for the new truncation message
                         print(f"[Translation] Truncation detected, batch size: {len(entries)} lines")
                         # Trigger split - if size is 1 we can't split, just fail
                         if len(entries) > 1:
@@ -475,55 +481,17 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
 # ============================================================================
 
 def parse_srt_file(srt_path: str) -> List[SubtitleEntry]:
-    """
-    Parse SRT file
-    
-    Args:
-        srt_path: SRT file path
-    
-    Returns:
-        List of subtitle entries
-    """
-    with open(srt_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    entries = []
-    blocks = content.strip().split('\n\n')
-    
-    for block in blocks:
-        lines = block.strip().split('\n')
-        if len(lines) >= 3:
-            try:
-                entries.append(
-                    SubtitleEntry(
-                        index=lines[0].strip(),
-                        timecode=lines[1].strip(),
-                        text='\n'.join(lines[2:]).strip()
-                    )
-                )
-            except Exception as e:
-                print(f"[Warning] Skipping invalid subtitle block: {e}")
-                continue
-    
-    return entries
+    """Parse SRT file using converter's robust logic"""
+    try:
+        with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        return SubtitleConverter.parse_srt(content)
+    except Exception as e:
+        print(f"[Translator] Failed to parse SRT {srt_path}: {e}")
+        return []
 
 
-def save_srt_file(entries: List[SubtitleEntry], output_path: str):
-    """
-    Save SRT file
-    
-    Args:
-        entries: Subtitle entries list
-        output_path: Output file path
-    """
-    lines = []
-    for entry in entries:
-        if not entry.text:
-            continue
-        lines.append(f"{entry.index}\n{entry.timecode}\n{entry.text}\n")
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
+# redundant save_srt_file removed, using SubtitleConverter.save_srt
 
 
 def translate_srt_file(
@@ -531,7 +499,8 @@ def translate_srt_file(
     config: TranslationConfig,
     output_path: Optional[str] = None,
     progress_callback=None,
-    is_cancelled=None
+    is_cancelled=None,
+    usage_callbacks: Optional[Tuple[Callable[[], int], Callable[[], None]]] = None
 ) -> Tuple[bool, str]:
     """
     Translate SRT file (high-level encapsulation)
@@ -541,6 +510,7 @@ def translate_srt_file(
         config: translation config
         output_path: output path (default: original.{target_lang}.srt)
         progress_callback: progress callback
+        usage_callbacks: tuple of (get_usage, increment_usage)
     
     Returns:
         (success flat, message)
@@ -552,7 +522,7 @@ def translate_srt_file(
             return False, "Subtitle file empty or invalid format"
         
         # Execute translation
-        translator = SubtitleTranslator(config, progress_callback)
+        translator = SubtitleTranslator(config, progress_callback, usage_callbacks)
         translated_entries = translator.translate_subtitles(entries, is_cancelled=is_cancelled)
         
         # Generate output path
@@ -564,7 +534,7 @@ def translate_srt_file(
             )
         
         # Save results
-        save_srt_file(translated_entries, output_path)
+        SubtitleConverter.save_srt(translated_entries, output_path)
         
         return True, f"Translation complete, saved to: {output_path}"
         

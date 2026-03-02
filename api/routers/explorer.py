@@ -1,20 +1,47 @@
-"""Explorer API Router — Allows traversing the system to select files"""
-
 import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
+from core.models import SUPPORTED_VIDEO_EXTENSIONS
+from core.config import ConfigManager
+from database.connection import get_db_connection
 
 router = APIRouter()
 
-SUPPORTED_VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.ts', '.flv', '.webm', '.m4v', '.wmv'}
-
 @router.get("")
-def list_directory(path: str = "/"):
+def list_directory(path: str = ""):
     """
     List contents of a directory.
-    Returns directories and supported video files.
+    Limited to paths within configured libraries.
     """
-    target = Path(path)
+    mgr = ConfigManager(get_db_connection)
+    config = mgr.load()
+    allowed_roots = [os.path.abspath(lib.path) for lib in config.libraries]
+    
+    if not path:
+        # If no path given, list the library roots themselves
+        results = []
+        for lib in config.libraries:
+            results.append({
+                "name": lib.name,
+                "path": os.path.abspath(lib.path),
+                "type": "directory",
+                "size": None
+            })
+        return {"current_path": "Mapped Units", "contents": results}
+
+    target_abs = os.path.abspath(path)
+    
+    # Check if target is equal to or under an allowed root
+    is_allowed = False
+    for root in allowed_roots:
+        if target_abs == root or target_abs.startswith(root + os.sep):
+            is_allowed = True
+            break
+            
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Access denied: path is outside mapped units")
+
+    target = Path(target_abs)
     
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Path '{path}' does not exist")
@@ -24,14 +51,19 @@ def list_directory(path: str = "/"):
         
     results = []
     
-    # Try resolving parent
+    # Parental traversal logic
     try:
-        parent = target.parent
-        # Add a special entry to go up
-        if target != parent:
+        parent_abs = os.path.abspath(target.parent)
+        is_parent_allowed = False
+        for root in allowed_roots:
+            if parent_abs == root or parent_abs.startswith(root + os.sep):
+                is_parent_allowed = True
+                break
+        
+        if is_parent_allowed and target_abs not in allowed_roots:
             results.append({
                 "name": "..",
-                "path": str(parent),
+                "path": parent_abs,
                 "type": "directory",
                 "size": None
             })
@@ -54,7 +86,7 @@ def list_directory(path: str = "/"):
                 })
             elif entry.is_file():
                 ext = Path(entry.name).suffix.lower()
-                if ext in SUPPORTED_VIDEO_EXTS:
+                if ext in SUPPORTED_VIDEO_EXTENSIONS:
                     results.append({
                         "name": entry.name,
                         "path": entry.path,

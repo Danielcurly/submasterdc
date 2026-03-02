@@ -18,7 +18,8 @@ class ScanRequest(BaseModel):
 def trigger_scan(body: ScanRequest):
     """Trigger a scan on a specific library path"""
     try:
-        count, logs = scan_media_directory(directory=body.library_path, debug=body.debug)
+        # Manual scans (triggered via this API) should force-retry failed tasks
+        count, logs = scan_media_directory(directory=body.library_path, debug=body.debug, force_failed_retry=True)
         return {
             "files_added": count,
             "logs": logs if body.debug else [],
