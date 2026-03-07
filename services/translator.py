@@ -341,8 +341,8 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                             current_usage = get_usage()
                             if current_usage >= self.config.max_daily_calls:
                                 raise TranslationError(f"DAILY_LIMIT_REACHED: Daily cap of {self.config.max_daily_calls} calls hit.")
-
-                    app_logger.debug(f"[SubtitleTranslator] Calling AI: model={self.config.model_name}, batch={len(entries)} entries")
+                    
+                    app_logger.info(f"[SubtitleTranslator] Calling AI ({self.config.model_name}): batch of {len(entries)} lines...")
                     app_logger.debug(f"[SubtitleTranslator] Prompt (preview): {prompt[:500]}...")
                     
                     response = self.client.chat.completions.create(
@@ -378,6 +378,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                             )
                         )
                     
+                    app_logger.info(f"[SubtitleTranslator] Batch of {len(entries)} lines translated successfully.")
                     return translated_entries
                     
                 except ParseError as e:

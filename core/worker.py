@@ -398,11 +398,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
                     has_analyzed_tracks = True
         
         if has_analyzed_tracks:
-            log_msg(f"Using cached info for {len(extracted_subs)} tracks")
+            log_msg(f"Using cached info for {len(extracted_subs)} tracks: {extracted_subs}")
         else:
             log_msg("Probing embedded subtitles (quick scan)...")
             extracted_subs = detect_embedded_languages(file_path, str(temp_dir))
-            log_msg(f"Detected {len(extracted_subs)} embedded tracks")
+            log_msg(f"Embedded scan finished. Tracks found: {extracted_subs}")
             
             if media_info and extracted_subs:
                 full_tracks = get_embedded_subtitles_info(file_path)
@@ -742,6 +742,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
             )
 
             def pcb(current, total, message):
+                app_logger.info(f"[{task_id}] Translation progress: {message} ({current}/{total} lines)")
                 TaskDAO.update_task(task_id, progress=50 + int((current/total)*45), log=message)
             
             def is_cancelled_cb():

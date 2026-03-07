@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { API_BASE, getSubtitleStyle, updateSubtitleStyle } from '@/lib/api';
+import { API_BASE, fetchAPI, getSubtitleStyle, updateSubtitleStyle } from '@/lib/api';
 import { ChevronRight, ChevronDown, ChevronUp, Folder, FileVideo, ArrowUp, RefreshCw, AlertCircle, Palette as PaletteIcon } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
@@ -77,11 +77,9 @@ export default function ManualPage() {
         setLoading(true);
         setError('');
         try {
-            const res = await fetch(`${API_BASE}/api/explorer?path=${encodeURIComponent(path)}`);
-            if (!res.ok) throw new Error('Failed to load directory');
-            const data: ExplorerResponse = await res.json();
-            setContents(data.contents);
-            setCurrentPath(data.current_path);
+            const data: ExplorerResponse = await fetchAPI(`/api/explorer?path=${encodeURIComponent(path)}`);
+            setContents(data.contents || []);
+            setCurrentPath(data.current_path || '/');
         } catch (err: any) {
             setError(err.message || 'Error communicating with server');
         } finally {
@@ -127,19 +125,13 @@ export default function ManualPage() {
         };
 
         try {
-            const res = await fetch(`${API_BASE}/api/tasks`, {
+            await fetchAPI(`/api/tasks`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     file_path: selectedFile,
                     params: JSON.stringify(paramsObj)
                 })
             });
-
-            if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data.detail || t('Failed to submit task'));
-            }
 
             setSuccessMessage(`${t('Task submitted to generate subtitles for')} ${selectedFile.split(/[\/\\]/).pop()}`);
         } catch (err: any) {
@@ -159,19 +151,13 @@ export default function ManualPage() {
             // Save the style globally first
             await updateSubtitleStyle(style);
 
-            const res = await fetch(`${API_BASE}/api/tasks`, {
+            await fetchAPI(`/api/tasks`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     file_path: selectedFile,
                     params: JSON.stringify({ action: 'update_style' })
                 })
             });
-
-            if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data.detail || t('Failed to submit task'));
-            }
 
             setSuccessMessage(`${t('Task submitted to update styles for')} ${selectedFile.split(/[\/\\]/).pop()}`);
             toast.success(t('Style saved and update task queued'));

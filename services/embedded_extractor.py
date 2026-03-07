@@ -98,7 +98,9 @@ def get_embedded_subtitles_info(file_path: str) -> list:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=False)
         app_logger.debug(f"[EmbeddedExtractor] ffprobe result: {result.stdout.strip()}")
         data = json.loads(result.stdout)
-        return data.get("streams", [])
+        streams = data.get("streams", [])
+        app_logger.info(f"[EmbeddedExtractor] Found {len(streams)} subtitle streams in file.")
+        return streams
     except Exception as e:
         app_logger.error(f"[EmbeddedExtractor] Failed to get embedded subtitles: {e}")
         return []
@@ -129,30 +131,36 @@ def detect_embedded_languages(file_path: str, temp_dir: str) -> dict[str, int]:
         codec = stream.get("codec_name", "").lower()
         
         if codec not in TEXT_CODECS:
+            app_logger.info(f"[EmbeddedExtractor] Skipping track {idx} (codec '{codec}' is not text-based)")
             continue
             
         snippet_path = os.path.join(temp_dir, f"snippet_{idx}.srt")
         
-        # Extract 120s snippet from middle
-        app_logger.info(f"[EmbeddedExtractor] Probing track {idx} from t={seek_time:.1f}s")
-        if _run_ffmpeg_extract(file_path, idx, streams, snippet_path, ss=seek_time, t=120):
-            if os.path.exists(snippet_path) and os.path.getsize(snippet_path) > 128: # Much smaller threshold for snippets
+        # Extract 600s snippet from middle
+        app_logger.info(f"[EmbeddedExtractor] Probing text track {idx} ({codec}) from t={seek_time:.1f}s")
+        if _run_ffmpeg_extract(file_path, idx, streams, snippet_path, ss=seek_time, t=600):
+            if os.path.exists(snippet_path) and os.path.getsize(snippet_path) > 10:
                 detected = detect_language_from_subtitle(snippet_path)
                 
                 from utils.lang_utils import normalize_language_code
                 norm = normalize_language_code(detected)
                 
-                app_logger.info(f"[EmbeddedExtractor] Track {idx} snippet detected as: {norm}")
+                app_logger.info(f"[EmbeddedExtractor] Track {idx} snippet ({codec}) detected as: {norm}")
                 
                 # Keep the first track found for each language
                 if norm not in detected_map:
                     detected_map[norm] = idx
+            else:
+                app_logger.warning(f"[EmbeddedExtractor] Track {idx} snippet was empty or too small.")
             
             # Clean up snippet immediately
             try:
-                os.remove(snippet_path)
+                if os.path.exists(snippet_path):
+                    os.remove(snippet_path)
             except Exception as e:
                 app_logger.warning(f"[EmbeddedExtractor] Could not delete temporary snippet {snippet_path}: {e}")
+        else:
+            app_logger.error(f"[EmbeddedExtractor] Failed to extract snippet for track {idx}")
                 
     return detected_map
 
