@@ -17,11 +17,12 @@ from pathlib import Path
 from openai import OpenAI
 from core.models import SubtitleEntry
 from services.subtitle_converter import SubtitleConverter
+from core.logger import app_logger
 
 
 @dataclass
-class TranslationConfig:
-    """Translation configuration"""
+class AITranslationConfig:
+    """AI-specific translation configuration (API keys, model, batching)"""
     api_key: str
     base_url: str
     model_name: str
@@ -31,6 +32,9 @@ class TranslationConfig:
     max_retries: int = 3
     timeout: int = 180
     max_daily_calls: int = 0  # 0 means unlimited
+
+# Backward-compatible alias
+TranslationConfig = AITranslationConfig
 
 
 
@@ -149,9 +153,9 @@ class SubtitleTranslator:
         if context_before or context_after:
             context_hint = "\n\nCONTEXT (for reference only, helps understand the flow):"
             if context_before:
-                context_hint += f"\nPrevious line: \"{context_before}\""
+                context_hint += f"\nPrevious lines: \"{context_before}\""
             if context_after:
-                context_hint += f"\nNext line: \"{context_after}\""
+                context_hint += f"\nNext lines: \"{context_after}\""
         
         prompt = f"""You are a professional subtitle translator. Translate the following dialogue to {target_lang}.
 
@@ -243,16 +247,16 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                 response = response.rstrip()[:-2] + ']'
                 try:
                     data = json.loads(response)
-                except:
-                    pass
+                except Exception as ex:
+                    app_logger.warning(f"Error parsing json after comma fix: {ex}")
             
             # Try 2: Check for missing closing bracket
             if 'data' not in locals() and not response.rstrip().endswith(']'):
                 response = response.rstrip() + ']'
                 try:
                     data = json.loads(response)
-                except:
-                    pass
+                except Exception as ex:
+                    app_logger.warning(f"Error parsing json after bracket fix: {ex}")
             
             # If still fails, throw detailed error
             if 'data' not in locals():
@@ -308,7 +312,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
         # Intelligent degradation: if batch causes truncations, split in 2
         # Reduced threshold to handle smaller batches that still truncate
         if len(entries) > 1 and retry_count >= 2:
-            print(f"[Intelligent Split] Splitting batch of {len(entries)} lines into smaller segments")
+            app_logger.info(f"[SubtitleTranslator] Intelligent Split: Splitting batch of {len(entries)} lines into smaller segments")
             if retry_count > 200: # Safety guard
                 raise TranslationError("Max recursion depth reached in translation split")
             mid = len(entries) // 2
@@ -323,7 +327,10 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
             if config_idx > self.current_config_idx:
                 self.current_config_idx = config_idx
                 self._init_current_client()
-                print(f"[Translation] Switched to fallback AI config #{config_idx + 1}")
+                app_logger.info(f"[SubtitleTranslator] Switched to fallback AI config #{config_idx + 1}")
+                conf = self.fallback_configs[config_idx]
+                masked_conf = f"ProviderConfig(api_key='***', base_url='{conf.base_url}', model_name='{conf.model_name}')"
+                app_logger.debug(f"[SubtitleTranslator] New config: {masked_conf}")
                 
             for attempt in range(self.config.max_retries):
                 try:
@@ -335,6 +342,9 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                             if current_usage >= self.config.max_daily_calls:
                                 raise TranslationError(f"DAILY_LIMIT_REACHED: Daily cap of {self.config.max_daily_calls} calls hit.")
 
+                    app_logger.debug(f"[SubtitleTranslator] Calling AI: model={self.config.model_name}, batch={len(entries)} entries")
+                    app_logger.debug(f"[SubtitleTranslator] Prompt (preview): {prompt[:500]}...")
+                    
                     response = self.client.chat.completions.create(
                         model=self.config.model_name,
                         messages=[{"role": "user", "content": prompt}],
@@ -347,6 +357,8 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                         self.usage_callbacks[1]() # increment_usage
                     
                     raw_response = response.choices[0].message.content
+                    app_logger.debug(f"[SubtitleTranslator] AI Response (raw): {raw_response}")
+                    
                     if raw_response is None:
                         # Some providers return None if filtered or empty
                         finish_reason = response.choices[0].finish_reason
@@ -375,7 +387,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     
                     # Check for truncated output
                     if "truncated format" in error_msg: # Specific check for the new truncation message
-                        print(f"[Translation] Truncation detected, batch size: {len(entries)} lines")
+                        app_logger.warning(f"[SubtitleTranslator] Truncation detected, batch size: {len(entries)} lines. Error: {error_msg}")
                         # Trigger split - if size is 1 we can't split, just fail
                         if len(entries) > 1:
                             return self._translate_batch(entries, context_before, context_after, retry_count + 99, is_cancelled)
@@ -385,7 +397,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
 
                     if attempt < self.config.max_retries - 1:
                         wait_time = (attempt + 1) * 2
-                        print(f"[Translation] Parse failed, retrying in {wait_time}s ({attempt+1}/{self.config.max_retries}): {error_msg[:100]}")
+                        app_logger.warning(f"[SubtitleTranslator] Parse failed, retrying in {wait_time}s ({attempt+1}/{self.config.max_retries}): {error_msg[:100]}")
                         time.sleep(wait_time)
                     else:
                         raise
@@ -397,14 +409,14 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
 
                     error_str = str(e).lower()
                     if "429" in error_str or "quota" in error_str or "rate limit" in error_str:
-                        print(f"[Translation] Quota error on config #{config_idx + 1}: {e}")
+                        app_logger.error(f"[SubtitleTranslator] Quota/Rate error on config #{config_idx + 1}: {e}")
                         last_error = APIError(f"API call failed: {e}")
                         break  # Break attempt loop, try next config
                         
                     last_error = APIError(f"API call failed: {e}")
                     if attempt < self.config.max_retries - 1:
                         wait_time = (attempt + 1) * 2
-                        print(f"[Translation] API error, retrying in {wait_time}s ({attempt+1}/{self.config.max_retries}): {e}")
+                        app_logger.warning(f"[SubtitleTranslator] AI API error, retrying in {wait_time}s ({attempt+1}/{self.config.max_retries}): {e}")
                         time.sleep(wait_time)
                     else:
                         raise last_error
@@ -454,9 +466,9 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
             batch_num = i // max_batch + 1
             batch = entries[i:i+max_batch]
             
-            # Get context
-            context_before = entries[i-1].text if i > 0 else None
-            context_after = entries[i+max_batch].text if i+max_batch < total_lines else None
+            # Get context (up to 5 lines)
+            context_before = " | ".join(e.text for e in entries[max(0, i-5):i]) if i > 0 else None
+            context_after = " | ".join(e.text for e in entries[i+max_batch:min(total_lines, i+max_batch+5)]) if i+max_batch < total_lines else None
             
             self._update_progress(
                 i, 

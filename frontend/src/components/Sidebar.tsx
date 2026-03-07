@@ -11,13 +11,17 @@ import {
     Cpu,
     Menu,
     FileVideo,
+    Bug,
+    Palette,
+    Settings2,
 } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { href: '/libraries', icon: Library, label: 'Libraries' },
     { href: '/translation', icon: Languages, label: 'Translation' },
-    { href: '/manual', icon: FileVideo, label: 'Manual Generation' },
+    { href: '/subtitle-config', icon: Palette, label: 'Subtitle Settings' },
+    { href: '/manual', icon: Settings2, label: 'Single File Ops' },
     { href: '/ai-config', icon: Cpu, label: 'AI Configuration' },
 ];
 
@@ -59,6 +63,23 @@ export default function Sidebar() {
                         );
                     })}
                 </nav>
+
+                <div className="sidebar-footer" style={{ marginTop: 'auto', padding: '12px 16px', borderTop: '1px solid var(--border-subtle)' }}>
+                    <button
+                        className="nav-item"
+                        style={{ background: 'transparent', border: 'none', width: '100%', justifyContent: 'flex-start', cursor: 'pointer', textAlign: 'left', padding: '12px' }}
+                        onClick={() => window.dispatchEvent(new CustomEvent('open-debug-panel'))}
+                        title={t('Logs')}
+                    >
+                        <Bug className="nav-icon" size={18} />
+                        {!collapsed && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
+                                <span>{t('Logs')}</span>
+                                <span style={{ fontSize: '11px', opacity: 0.5 }}>v0.1.2</span>
+                            </div>
+                        )}
+                    </button>
+                </div>
             </aside>
         </>
     );

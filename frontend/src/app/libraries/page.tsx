@@ -5,7 +5,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { getLibraries, addLibrary, updateLibrary, deleteLibrary, browseDirectory, API_BASE } from '@/lib/api';
 import {
     Library as LibraryIcon, FolderOpen, Plus, Trash2, ChevronUp,
-    Folder, HardDrive, AlertTriangle, Settings2, Clock, CheckCircle2, X, ArrowUp
+    Folder, HardDrive, AlertTriangle, Settings2, Clock, CheckCircle2, X, ArrowUp, Film
 } from 'lucide-react';
 
 interface FileEntry {
@@ -17,11 +17,10 @@ interface FileEntry {
 
 interface Library {
     id: string; name: string; path: string; scan_mode: string;
-    scan_interval_hours: number; path_exists: boolean;
+    scan_interval_hours: number; path_exists: boolean; file_count?: number;
 }
 
 const DHMInputs = ({ valueHours, onChange, disabled }: { valueHours: number, onChange: (h: number) => void, disabled?: boolean }) => {
-    // Round to avoid float precision issues in UI
     const totalMinutes = Math.round(valueHours * 60);
     const d = Math.floor(totalMinutes / (24 * 60));
     const h = Math.floor((totalMinutes % (24 * 60)) / 60);
@@ -32,22 +31,39 @@ const DHMInputs = ({ valueHours, onChange, disabled }: { valueHours: number, onC
         onChange(total / 60);
     };
 
+    const inputStyle: React.CSSProperties = {
+        width: 42,
+        padding: '4px 0',
+        textAlign: 'center' as const,
+        fontSize: '13px',
+        fontWeight: 700,
+        backgroundColor: 'rgba(0,0,0,0.25)',
+        border: '1px solid rgba(255,255,255,0.05)',
+        borderRadius: '8px',
+        color: '#f8fafc',
+        outline: 'none'
+    };
+
+    const labelStyle: React.CSSProperties = {
+        fontSize: '11px',
+        fontWeight: 700,
+        color: '#475569',
+        marginLeft: '2px'
+    };
+
     return (
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', opacity: disabled ? 0.5 : 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <input type="number" className="form-input" style={{ width: 42, padding: 4, textAlign: 'center', fontSize: 12 }}
-                    value={d} min={0} disabled={disabled} onChange={e => update(Number(e.target.value), h, m)} />
-                <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)' }}>D</span>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', opacity: disabled ? 0.5 : 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="number" style={inputStyle} value={d} min={0} disabled={disabled} onChange={e => update(Number(e.target.value), h, m)} />
+                <span style={labelStyle}>D</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <input type="number" className="form-input" style={{ width: 42, padding: 4, textAlign: 'center', fontSize: 12 }}
-                    value={h} min={0} max={23} disabled={disabled} onChange={e => update(d, Number(e.target.value), m)} />
-                <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)' }}>H</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="number" style={inputStyle} value={h} min={0} max={23} disabled={disabled} onChange={e => update(d, Number(e.target.value), m)} />
+                <span style={labelStyle}>H</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <input type="number" className="form-input" style={{ width: 42, padding: 4, textAlign: 'center', fontSize: 12 }}
-                    value={m} min={0} max={59} disabled={disabled} onChange={e => update(d, h, Number(e.target.value))} />
-                <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)' }}>M</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="number" style={inputStyle} value={m} min={0} max={59} disabled={disabled} onChange={e => update(d, h, Number(e.target.value))} />
+                <span style={labelStyle}>M</span>
             </div>
         </div>
     );
@@ -88,11 +104,11 @@ export default function LibrariesPage() {
         if (!currentPath) return;
         try {
             await addLibrary({ name: newName, path: currentPath, scan_mode: newMode });
-            setMessage(`Library "${newName}" added!`);
+            setMessage(t('Library "{name}" added!').replace('{name}', newName));
             setNewName('New Library');
             setShowAddMenu(false);
             await load();
-        } catch (e: unknown) { setMessage(`Error: ${e instanceof Error ? e.message : 'Unknown'}`); }
+        } catch (e: unknown) { setMessage(`${t('Error')}: ${e instanceof Error ? e.message : 'Unknown'}`); }
     };
 
     const handleModeChange = async (id: string, mode: string) => {
@@ -128,11 +144,11 @@ export default function LibrariesPage() {
     const handleDelete = async (id: string, name: string) => {
         try {
             await deleteLibrary(id);
-            setMessage(`Library "${name}" deleted.`);
+            setMessage(t('Library "{name}" deleted').replace('{name}', name));
             await load();
         } catch (error: any) {
             console.error('[handleDelete] Error:', error);
-            setMessage(`Failed to delete library: ${error.message || error}`);
+            setMessage(`${t('Failed to delete library')}: ${error.message || error}`);
         }
     };
 
@@ -171,114 +187,160 @@ export default function LibrariesPage() {
                         <p>{t('No libraries configured yet')}</p>
                     </div>
                 ) : (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, 360px)', gap: 24, padding: '4px 0' }}>
                         {libraries.map(lib => (
-                            <div key={lib.id} className="card" style={{ width: 320, flexShrink: 0, padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
-                                {/* Header (Icon, Name, Delete) */}
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                    <div style={{ display: 'flex', gap: 12, alignItems: 'center', minWidth: 0, flex: 1 }}>
-                                        <div className="card-icon purple" style={{ flexShrink: 0, width: 32, height: 32, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                            <HardDrive size={16} />
-                                        </div>
-                                        {editingId === lib.id ? (
-                                            <input
-                                                type="text"
-                                                className="form-input"
-                                                value={editName}
-                                                onChange={e => setEditName(e.target.value)}
-                                                onBlur={() => handleRenameSubmit(lib.id)}
-                                                onKeyDown={e => {
-                                                    if (e.key === 'Enter') {
-                                                        e.currentTarget.blur();
-                                                    } else if (e.key === 'Escape') {
-                                                        setEditingId(null);
-                                                    }
-                                                }}
-                                                // eslint-disable-next-line jsx-a11y/no-autofocus
-                                                autoFocus
-                                                style={{ flex: 1, padding: '4px 8px', fontSize: 13, minWidth: 0, height: 28 }}
-                                            />
-                                        ) : (
-                                            <h3
-                                                style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text-bright)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'text' }}
-                                                onClick={() => startEditing(lib.id, lib.name)}
-                                                title="Click to rename"
-                                            >
-                                                {lib.name}
-                                            </h3>
-                                        )}
-                                    </div>
-                                    <button
-                                        className="btn btn-danger btn-sm btn-icon"
-                                        onClick={() => handleDelete(lib.id, lib.name)}
-                                        title="Delete library"
-                                        style={{ padding: 6, opacity: 0.6, margin: '-6px -6px 0 0' }}
-                                        onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                                        onMouseLeave={(e) => e.currentTarget.style.opacity = '0.6'}
-                                    >
-                                        <Trash2 size={14} />
-                                    </button>
-                                </div>
+                            <div key={lib.id} className="card" style={{
+                                display: 'flex', flexDirection: 'column', gap: 10,
+                                padding: '16px 24px 12px 24px',
+                                border: '1px solid rgba(255, 255, 255, 0.05)',
+                                boxShadow: '0 8px 30px rgba(0, 0, 0, 0.2)',
+                                borderRadius: '16px',
+                                backgroundColor: 'var(--bg-secondary)',
+                                transition: 'all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)',
+                            }}>
+                                {/* Top Content Flexbox (Two Rows) */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
 
-                                {/* Path */}
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>
-                                    <FolderOpen size={14} style={{ flexShrink: 0 }} />
-                                    <code style={{ background: 'var(--bg-darker)', padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>
-                                        {lib.path}
-                                    </code>
-                                </div>
-
-                                {/* Path Status */}
-                                <div style={{ marginTop: -6, minHeight: 24 }}>
-                                    {lib.path_exists ? (
-                                        <span className="chip chip-green" style={{
-                                            color: '#4ade80',
-                                            background: 'rgba(34, 197, 94, 0.15)',
-                                            fontWeight: 700
+                                    {/* Upper Section: Icon, Title, Path, Trash */}
+                                    <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start' }}>
+                                        {/* Icon */}
+                                        <div style={{
+                                            width: '48px', height: '48px', borderRadius: '12px',
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            backgroundColor: 'rgba(99, 102, 241, 0.08)',
+                                            boxShadow: 'inset 0 0 0 1px rgba(99, 102, 241, 0.1), 0 0 24px rgba(99, 102, 241, 0.15)',
+                                            color: '#818cf8', flexShrink: 0
                                         }}>
-                                            <CheckCircle2 size={10} /> {t('PATH VALID')}
-                                        </span>
-                                    ) : (
-                                        <span className="chip chip-red" style={{ fontWeight: 700 }}>
-                                            <AlertTriangle size={10} /> {t('PATH NOT FOUND')}
-                                        </span>
-                                    )}
-                                </div>
+                                            <HardDrive size={24} strokeWidth={1.5} />
+                                        </div>
 
-                                {/* Scan Mode */}
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 13 }}>
-                                        <Settings2 size={14} />
-                                        <span>{t('Scan Mode')}</span>
+                                        {/* Title & Path */}
+                                        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' }}>
+                                            {editingId === lib.id ? (
+                                                <input
+                                                    type="text"
+                                                    className="form-input"
+                                                    value={editName}
+                                                    onChange={e => setEditName(e.target.value)}
+                                                    onBlur={() => handleRenameSubmit(lib.id)}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') e.currentTarget.blur();
+                                                        else if (e.key === 'Escape') setEditingId(null);
+                                                    }}
+                                                    // eslint-disable-next-line jsx-a11y/no-autofocus
+                                                    autoFocus
+                                                    style={{ width: '100%', padding: '6px 12px', fontSize: '18px', fontWeight: 800 }}
+                                                />
+                                            ) : (
+                                                <h3 style={{
+                                                    margin: 0, fontSize: '18px', fontWeight: 800,
+                                                    color: '#f8fafc', whiteSpace: 'nowrap',
+                                                    overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer',
+                                                    letterSpacing: '-0.02em', lineHeight: 1.2
+                                                }} onClick={() => startEditing(lib.id, lib.name)} title={t("Click to rename")}>
+                                                    {lib.name}
+                                                </h3>
+                                            )}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#64748b', fontSize: '13px', fontFamily: 'monospace' }}>
+                                                <FolderOpen size={14} style={{ opacity: 0.8 }} />
+                                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lib.path}</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Trash */}
+                                        <button
+                                            className="btn btn-ghost"
+                                            onClick={() => handleDelete(lib.id, lib.name)}
+                                            style={{ padding: '10px', borderRadius: '10px', color: '#ef4444', border: '1px solid rgba(239,68,68,0.15)', backgroundColor: 'transparent', flexShrink: 0 }}
+                                            title={t("Delete library")}
+                                        >
+                                            <Trash2 size={20} />
+                                        </button>
                                     </div>
-                                    <select
-                                        className="form-select"
-                                        value={lib.scan_mode}
-                                        onChange={e => handleModeChange(lib.id, e.target.value)}
-                                        style={{ width: 140, padding: '4px 8px', fontSize: 12 }}
-                                    >
-                                        <option value="manual">{t('Manual')}</option>
-                                        <option value="periodic">{t('Periodic')}</option>
-                                        <option value="automatic">{t('Automatic (Watchdog)')}</option>
-                                    </select>
+
+                                    {/* Middle Section: Status and Videos count */}
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <div style={{
+                                            display: 'flex', alignItems: 'center', gap: '8px',
+                                            padding: '6px 14px', borderRadius: '20px',
+                                            backgroundColor: lib.path_exists ? 'rgba(74, 222, 128, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                                            boxShadow: lib.path_exists
+                                                ? '0 2px 10px rgba(74, 222, 128, 0.1), inset 0 0 10px rgba(74, 222, 128, 0.05)'
+                                                : '0 2px 10px rgba(239, 68, 68, 0.1), inset 0 0 10px rgba(239, 68, 68, 0.05)',
+                                            whiteSpace: 'nowrap'
+                                        }}>
+                                            <div style={{
+                                                width: '8px', height: '8px', borderRadius: '50%',
+                                                backgroundColor: lib.path_exists ? '#4ade80' : '#ef4444',
+                                                boxShadow: lib.path_exists
+                                                    ? '0 0 8px rgba(74, 222, 128, 0.8)'
+                                                    : '0 0 8px rgba(239, 68, 68, 0.8)'
+                                            }} />
+                                            <span style={{
+                                                fontSize: '11px', fontWeight: 800, letterSpacing: '0.05em',
+                                                color: lib.path_exists ? '#4ade80' : '#ef4444'
+                                            }}>
+                                                {lib.path_exists ? t('PATH VALID') : t('PATH NOT FOUND')}
+                                            </span>
+                                        </div>
+                                        <div style={{
+                                            display: 'flex', alignItems: 'center', gap: '6px',
+                                            padding: '8px 16px', borderRadius: '20px',
+                                            backgroundColor: 'rgba(99, 102, 241, 0.1)', color: '#a5b4fc',
+                                            fontSize: '13px', fontWeight: 700, border: '1px solid rgba(99, 102, 241, 0.25)',
+                                            boxShadow: '0 0 15px rgba(99, 102, 241, 0.15)'
+                                        }}>
+                                            <Film size={14} strokeWidth={2.5} />
+                                            <span>{lib.file_count || 0} {t('Videos')}</span>
+                                        </div>
+                                    </div>
                                 </div>
 
-                                {/* Interval */}
+                                {/* Divider */}
+                                <div style={{ height: '1px', backgroundColor: 'rgba(255,255,255,0.05)', margin: '0' }} />
+
+                                {/* Bottom Controls */}
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <div style={{ fontSize: '12px', fontWeight: 800, color: '#64748b', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                                        SCAN MODE
+                                    </div>
+
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                        <Settings2 size={14} color="#64748b" />
+                                        <select
+                                            className="form-select"
+                                            value={lib.scan_mode}
+                                            onChange={e => handleModeChange(lib.id, e.target.value)}
+                                            style={{
+                                                padding: '8px 12px', fontSize: '14px',
+                                                backgroundColor: 'rgba(255,255,255,0.03)',
+                                                border: '1px solid rgba(255,255,255,0.08)',
+                                                borderRadius: '8px', minWidth: '180px',
+                                                color: '#f8fafc',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            <option style={{ backgroundColor: '#1e293b', color: '#f8fafc' }} value="manual">{t('Manual')}</option>
+                                            <option style={{ backgroundColor: '#1e293b', color: '#f8fafc' }} value="periodic">{t('Periodic')}</option>
+                                            <option style={{ backgroundColor: '#1e293b', color: '#f8fafc' }} value="automatic">{t('Automatic (Watchdog)')}</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {/* Interval (Periodic only) */}
                                 <div style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    opacity: lib.scan_mode === 'periodic' ? 1 : 0.3,
-                                    pointerEvents: lib.scan_mode === 'periodic' ? 'auto' : 'none',
-                                    transition: 'opacity 0.2s ease'
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px',
+                                    height: lib.scan_mode === 'periodic' ? '32px' : '0',
+                                    opacity: lib.scan_mode === 'periodic' ? 1 : 0,
+                                    marginTop: lib.scan_mode === 'periodic' ? '2px' : '0',
+                                    overflow: 'hidden', transition: 'all 0.3s ease'
                                 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 13 }}>
-                                        <Clock size={14} />
-                                        <span>{t('Interval')}</span>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#475569', fontSize: '14px', fontWeight: 600 }}>
+                                        <Clock size={16} />
+                                        <span>{t('Interval')}:</span>
                                     </div>
                                     <DHMInputs
                                         valueHours={lib.scan_interval_hours}
-                                        disabled={lib.scan_mode !== 'periodic'}
                                         onChange={h => handleIntervalChange(lib.id, h)}
                                     />
                                 </div>

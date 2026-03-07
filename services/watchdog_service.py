@@ -6,7 +6,6 @@ Responsible for monitoring library directories for new media files
 """
 
 import time
-import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional
@@ -15,8 +14,7 @@ from watchdog.events import FileSystemEventHandler
 
 from core.models import ScanMode, SUPPORTED_VIDEO_EXTENSIONS
 from services.media_scanner import scan_media_directory
-
-logger = logging.getLogger(__name__)
+from core.logger import app_logger
 
 class MediaFolderHandler(FileSystemEventHandler):
     """Handles file system events for a specific library"""
@@ -33,6 +31,22 @@ class MediaFolderHandler(FileSystemEventHandler):
     def on_moved(self, event):
         if not event.is_directory:
             self._handle_event(event.dest_path)
+    
+    def on_deleted(self, event):
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        if path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
+            app_logger.info(f"[Watchdog] Media file deleted: {event.src_path}")
+            try:
+                from database.media_dao import MediaDAO
+                from database.task_dao import TaskDAO
+                # Remove from media_files table
+                MediaDAO.delete_media_file(event.src_path)
+                # Cancel any pending task for this file
+                TaskDAO.cancel_task_by_path(event.src_path)
+            except Exception as e:
+                app_logger.error(f"[Watchdog] Failed to clean up deleted file {event.src_path}: {e}")
             
     def _handle_event(self, file_path: str):
         path = Path(file_path)
@@ -43,7 +57,7 @@ class MediaFolderHandler(FileSystemEventHandler):
                 return
             
             self.last_triggered[file_path] = now
-            logger.info(f"[Watchdog] New/Moved media detected: {file_path}. Waiting for transfer to complete...")
+            app_logger.info(f"[Watchdog] New/Moved media detected: {file_path}. Waiting for transfer to complete...")
             
             # Wait for file to be fully written by checking if it can be opened exclusively.
             # On Windows network shares, os.path.getsize() reports the FINAL size immediately,
@@ -70,16 +84,16 @@ class MediaFolderHandler(FileSystemEventHandler):
                 return False
                 
             if wait_for_file_ready(file_path):
-                logger.info(f"[Watchdog] File transfer complete: {file_path}")
+                app_logger.info(f"[Watchdog] File transfer complete: {file_path}")
             else:
-                logger.warning(f"[Watchdog] File still locked after timeout: {file_path}. Scanning anyway.")
+                app_logger.warning(f"[Watchdog] File still locked after timeout: {file_path}. Scanning anyway.")
             
             try:
                 # Get library path context
                 # Trigger scan for the directory containing the file
                 scan_media_directory(directory=self.library_path, subdirectory=str(path.parent))
             except Exception as e:
-                logger.error(f"[Watchdog] Failed to process {file_path}: {e}")
+                app_logger.error(f"[Watchdog] Failed to process {file_path}: {e}")
 
 class WatchdogService:
     """Manages watchers for all libraries in watchdog mode"""
@@ -91,13 +105,13 @@ class WatchdogService:
         
     def start(self):
         """Start the watchdog observer"""
-        logger.info("[Watchdog] Starting service...")
+        app_logger.info("[Watchdog] Starting service...")
         self.observer.start()
         self.refresh_watchers()
         
     def stop(self):
         """Stop the watchdog observer"""
-        logger.info("[Watchdog] Stopping service...")
+        app_logger.info("[Watchdog] Stopping service...")
         self.observer.stop()
         self.observer.join()
         
@@ -114,22 +128,22 @@ class WatchdogService:
                     to_remove.append(lib_id)
             
             for lib_id in to_remove:
-                logger.info(f"[Watchdog] Removing watcher for library {lib_id}")
+                app_logger.info(f"[Watchdog] Removing watcher for library {lib_id}")
                 try:
                     self.observer.unschedule(self.watchers[lib_id])
-                except Exception:
-                    pass
+                except Exception as e:
+                    app_logger.warning(f"[Watchdog] Failed to unschedule watcher for lib {lib_id}: {e}")
                 del self.watchers[lib_id]
             
             # Add/Update watchers for libraries in watchdog mode
             for lib_id, lib in watchdog_libs.items():
                 if lib_id not in self.watchers:
                     if Path(lib.path).exists():
-                        logger.info(f"[Watchdog] Adding watcher for {lib.name} at {lib.path}")
+                        app_logger.info(f"[Watchdog] Adding watcher for {lib.name} at {lib.path}")
                         handler = MediaFolderHandler(lib.path)
                         watch = self.observer.schedule(handler, lib.path, recursive=True)
                         self.watchers[lib_id] = watch
                     else:
-                        logger.warning(f"[Watchdog] Cannot watch {lib.path} (path not found)")
+                        app_logger.warning(f"[Watchdog] Cannot watch {lib.path} (path not found)")
         except Exception as e:
-            logger.error(f"[Watchdog] Error refreshing watchers: {e}")
+            app_logger.error(f"[Watchdog] Error refreshing watchers: {e}")

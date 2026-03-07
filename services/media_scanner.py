@@ -13,6 +13,7 @@ from typing import List, Tuple, Optional
 from core.models import SubtitleInfo, SUPPORTED_VIDEO_EXTENSIONS
 from database.media_dao import MediaDAO
 from utils.lang_detection import detect_language_combined
+from core.logger import app_logger
 
 
 # Default media root directory
@@ -31,6 +32,8 @@ class MediaScanner:
             media_root: Media root directory
         """
         self.media_root = Path(media_root)
+        from database.media_dao import MediaDAO
+        self.media_dao = MediaDAO()
     
     def discover_subdirectories(self, max_depth: int = 3) -> List[str]:
         """
@@ -71,7 +74,7 @@ class MediaScanner:
                     continue
         
         except Exception as e:
-            print(f"[MediaScanner] Failed to discover subdirectories: {e}")
+            app_logger.error(f"[MediaScanner] Failed to discover subdirectories: {e}")
         
         return sorted(subdirs)
     
@@ -108,6 +111,7 @@ class MediaScanner:
         found_paths = []
         
         if debug:
+            app_logger.debug(f"[MediaScanner] Scanning directory: {scan_path}")
             debug_logs.append(f"📂 Scanning directory: {scan_path}")
         
         try:
@@ -130,6 +134,10 @@ class MediaScanner:
                         # Check if has translations
                         has_translated = self._check_has_translation(subtitles)
                         
+                        # Get embedded tracks info (Point 3.1)
+                        from services.embedded_extractor import get_embedded_subtitles_info
+                        embedded_tracks = get_embedded_subtitles_info(str(file_path))
+                        
                         # Prepare batch data for insertion
                         subtitles_json = json.dumps(
                             [s.to_dict() for s in subtitles],
@@ -141,7 +149,8 @@ class MediaScanner:
                             file,
                             file_path.stat().st_size,
                             subtitles_json,
-                            int(has_translated)
+                            int(has_translated),
+                            json.dumps(embedded_tracks, ensure_ascii=False)
                         ))
                         
                         found_paths.append(str(file_path))
@@ -161,7 +170,7 @@ class MediaScanner:
                     debug_logs.append(f"✓ Batch wrote {len(batch_data)} records")
         
         except Exception as e:
-            print(f"[MediaScanner] Scan failed: {e}")
+            app_logger.error(f"[MediaScanner] Scan failed: {e}")
             if debug:
                 debug_logs.append(f"✗ Scan failed: {e}")
         
@@ -183,7 +192,7 @@ class MediaScanner:
             potential_subs = [
                 p for p in all_files
                 if p.is_file()
-                and p.name.lower().endswith(('.srt', '.ass'))
+                and p.name.lower().endswith(('.srt', '.ass', '.vtt', '.sub', '.ssa'))
                 and p.name.lower().startswith(base_name.lower())
             ]
             
@@ -203,6 +212,19 @@ class MediaScanner:
                     is_bilingual = getattr(s_info, 'is_bilingual', False)
                     primary_lang = getattr(s_info, 'primary_lang', None)
                     secondary_lang = getattr(s_info, 'secondary_lang', None)
+                
+                # Fallback: detect via file signature if DB has no info
+                if not is_app_generated:
+                    try:
+                        from services.subtitle_converter import read_submasterdc_signature
+                        sig = read_submasterdc_signature(path_str)
+                        if sig:
+                            is_app_generated = True
+                            is_bilingual = sig.get('bilingual') == 'yes'
+                            primary_lang = sig.get('primary') or primary_lang
+                            secondary_lang = sig.get('secondary') or secondary_lang
+                    except Exception as e:
+                        app_logger.warning(f"[MediaScanner] Failed to parse subtitle signature from {path_str}: {e}")
                 
                 # Detect language
                 lang_code, tag = detect_language_combined(
@@ -225,14 +247,14 @@ class MediaScanner:
                 ))
         
         except Exception as e:
-            print(f"[MediaScanner] Failed to scan subtitles for {video_path}: {e}")
+            app_logger.error(f"[MediaScanner] Failed to scan subtitles for {video_path}: {e}")
         
         return subtitles
     
     def _check_has_translation(self, subtitles: List[SubtitleInfo]) -> bool:
-        """Check if there are Chinese translation subtitles"""
+        """Check if there are app-generated translation subtitles"""
         for sub in subtitles:
-            if sub.lang.lower() in ['zh', 'chs', 'cht']:
+            if getattr(sub, 'is_app_generated', False):
                 return True
         return False
     
@@ -241,14 +263,28 @@ class MediaScanner:
         path = Path(video_path)
         if not path.exists():
             return
-        
+            
+        from database.media_dao import MediaDAO
         existing_media = MediaDAO.get_media_by_path(video_path)
         existing_subs = existing_media.subtitles if existing_media else []
         
+        # Scan subtitles for video
         subtitles = self._scan_subtitles_for_video(path, existing_subs)
         has_translated = self._check_has_translation(subtitles)
         
-        MediaDAO.update_media_subtitles(video_path, subtitles, has_translated)
+        # Get embedded tracks info (Point 3.1)
+        from services.embedded_extractor import get_embedded_subtitles_info
+        embedded_tracks = get_embedded_subtitles_info(video_path)
+        
+        # Update in database using comprehensive method
+        self.media_dao.add_or_update_media_file(
+            file_path=video_path,
+            file_name=path.name,
+            file_size=path.stat().st_size,
+            subtitles=subtitles,
+            has_translated=has_translated,
+            embedded_tracks=embedded_tracks
+        )
 
 
 # ============================================================================

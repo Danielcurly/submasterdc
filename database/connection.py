@@ -6,24 +6,43 @@ Provides unified database access interface
 """
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
 
-# Database path
-DB_PATH = "./data/subtitle_manager.db"
+# Database path (absolute, resolved from project root)
+DB_PATH = str(Path(__file__).resolve().parent.parent / "data" / "subtitle_manager.db")
 
+_local = threading.local()
+
+class _CachedConnectionProxy:
+    """A proxy wrapper that prevents the DAOs from actually closing the persistent thread-local connection."""
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        # Intercept the close() method and do nothing
+        if name == 'close':
+            return lambda: None
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 def get_db_connection() -> sqlite3.Connection:
     """
-    Get database connection
-    
-    Returns:
-        sqlite3.Connection: Database connection object
+    Get a persistent thread-local database connection safely wrapped in a proxy.
+    This drastically reduces overhead from repeatedly connecting/closing in DAOs.
     """
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-    conn.execute('PRAGMA journal_mode=WAL')
-    return conn
+    if not hasattr(_local, 'conn'):
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+        conn.execute('PRAGMA journal_mode=WAL')
+        _local.conn = _CachedConnectionProxy(conn)
+    return getattr(_local, 'conn')  # type: ignore
 
 
 def init_database():
@@ -44,9 +63,16 @@ def init_database():
                 file_size INTEGER,
                 subtitles_json TEXT DEFAULT '[]',
                 has_translated INTEGER DEFAULT 0,
+                embedded_tracks_json TEXT DEFAULT '[]',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Add 'embedded_tracks_json' column to existing media_files table if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE media_files ADD COLUMN embedded_tracks_json TEXT DEFAULT '[]'")
+        except sqlite3.OperationalError:
+            pass # Column already exists
         
         # Create tasks table
         cursor.execute("""
@@ -174,6 +200,8 @@ def execute_query(query: str, params: tuple = ()) -> list:
     try:
         cursor = conn.execute(query, params)
         return cursor.fetchall()
+    except Exception as e:
+        raise e
     finally:
         conn.close()
 

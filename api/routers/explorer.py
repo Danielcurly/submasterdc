@@ -1,66 +1,46 @@
 import os
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
-from core.models import SUPPORTED_VIDEO_EXTENSIONS
-from core.config import ConfigManager
-from database.connection import get_db_connection
+from fastapi import APIRouter
+from core.models import SUPPORTED_VIDEO_EXTENSIONS, StandardResponse
+from api.deps import get_config_manager
 
 router = APIRouter()
 
-@router.get("")
+@router.get("", response_model=StandardResponse)
 def list_directory(path: str = ""):
     """
     List contents of a directory.
-    Limited to paths within configured libraries.
+    Allows generic browsing of the filesystem.
     """
-    mgr = ConfigManager(get_db_connection)
-    config = mgr.load()
-    allowed_roots = [os.path.abspath(lib.path) for lib in config.libraries]
-    
     if not path:
-        # If no path given, list the library roots themselves
+        # If no path given, show available mount points / root dirs
         results = []
-        for lib in config.libraries:
+        from api.browse_utils import get_root_dirs
+        for d in get_root_dirs():
             results.append({
-                "name": lib.name,
-                "path": os.path.abspath(lib.path),
+                "name": os.path.basename(d) or d,
+                "path": d,
                 "type": "directory",
                 "size": None
             })
-        return {"current_path": "Mapped Units", "contents": results}
+        return StandardResponse(success=True, message="Volumes loaded", data={"current_path": "Available Volumes", "contents": results})
 
     target_abs = os.path.abspath(path)
-    
-    # Check if target is equal to or under an allowed root
-    is_allowed = False
-    for root in allowed_roots:
-        if target_abs == root or target_abs.startswith(root + os.sep):
-            is_allowed = True
-            break
-            
-    if not is_allowed:
-        raise HTTPException(status_code=403, detail="Access denied: path is outside mapped units")
-
     target = Path(target_abs)
     
     if not target.exists():
-        raise HTTPException(status_code=404, detail=f"Path '{path}' does not exist")
+        return StandardResponse(success=False, message=f"Path '{path}' does not exist", data=[])
         
     if not target.is_dir():
-        raise HTTPException(status_code=400, detail=f"Path '{path}' is not a directory")
+        return StandardResponse(success=False, message=f"Path '{path}' is not a directory", data=[])
         
     results = []
     
     # Parental traversal logic
     try:
         parent_abs = os.path.abspath(target.parent)
-        is_parent_allowed = False
-        for root in allowed_roots:
-            if parent_abs == root or parent_abs.startswith(root + os.sep):
-                is_parent_allowed = True
-                break
-        
-        if is_parent_allowed and target_abs not in allowed_roots:
+        # Avoid going above system root (e.g., above '/' in linux or 'C:\' in windows)
+        if target_abs != parent_abs:
             results.append({
                 "name": "..",
                 "path": parent_abs,
@@ -71,8 +51,14 @@ def list_directory(path: str = ""):
         pass
 
     try:
+        is_root = (target_abs == '/' or target_abs == os.path.abspath('/'))
+        from api.browse_utils import _SYSTEM_DIRS
+
         for entry in os.scandir(str(target)):
             if entry.name.startswith('.'):
+                continue
+            
+            if is_root and entry.name in _SYSTEM_DIRS:
                 continue
                 
             is_dir = entry.is_dir()
@@ -94,9 +80,9 @@ def list_directory(path: str = ""):
                         "size": entry.stat().st_size
                     })
     except PermissionError:
-        raise HTTPException(status_code=403, detail="Permission denied to read this directory")
+        return StandardResponse(success=False, message="Permission denied to read this directory", data=[])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading directory: {e}")
+        return StandardResponse(success=False, message=f"Error reading directory: {e}", data=[])
         
     # Sort: folders first, then files alphabetically
     results = sorted(results, key=lambda x: (
@@ -105,7 +91,11 @@ def list_directory(path: str = ""):
         x['name'].lower()
     ))
     
-    return {
-        "current_path": str(target),
-        "contents": results
-    }
+    return StandardResponse(
+        success=True,
+        message="Directory loaded",
+        data={
+            "current_path": str(target),
+            "contents": results
+        }
+    )

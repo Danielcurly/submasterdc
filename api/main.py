@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from database.connection import init_database
 from core.worker import start_worker
 
-from api.routers import config, libraries, tasks, scan, ai, explorer
+from api.routers import config, libraries, tasks, scan, ai, explorer, debug
 
 
 @asynccontextmanager
@@ -31,9 +31,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SubMasterDC API",
-    description="NAS Subtitle Manager API",
-    version="0.1.1",
+    title="SubmasterDC API",
+    description="Backend API for SubmasterDC Subtitle Automation",
+    version="v0.1.2",
     lifespan=lifespan
 )
 
@@ -53,6 +53,7 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["Tasks"])
 app.include_router(scan.router, prefix="/api/scan", tags=["Scan"])
 app.include_router(ai.router, prefix="/api/ai", tags=["AI"])
 app.include_router(explorer.router, prefix="/api/explorer", tags=["Explorer"])
+app.include_router(debug.router, prefix="/api/debug", tags=["Debug"])
 
 
 @app.get("/api/health")

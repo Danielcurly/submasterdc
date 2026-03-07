@@ -5,23 +5,34 @@ async function fetchAPI(path: string, options?: RequestInit) {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,
   });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail || 'API Error');
+
+  const json = await res.json().catch(() => null);
+
+  if (!res.ok || (json && typeof json.success === 'boolean' && json.success === false)) {
+    throw new Error(json?.message || json?.detail || res.statusText || 'API Error');
   }
-  return res.json();
+
+  if (json && typeof json.success === 'boolean' && 'data' in json) {
+    return json.data;
+  }
+
+  return json;
 }
 
 // Config
 export const getConfig = () => fetchAPI('/api/config');
 export const saveConfig = (config: Record<string, unknown>) =>
   fetchAPI('/api/config', { method: 'PUT', body: JSON.stringify({ config }) });
-export const getProviders = () => fetchAPI('/api/config/providers');
-export const getContentTypes = () => fetchAPI('/api/config/content-types');
+export const getProviders = () => fetchAPI('/api/ai/providers');
+export const getContentTypes = () => fetchAPI('/api/ai/content-types');
 export const getVadPresets = () => fetchAPI('/api/config/vad-presets');
+export const getSubtitleStyle = () => fetchAPI('/api/config/subtitles');
+export const updateSubtitleStyle = (style: Record<string, unknown>) =>
+  fetchAPI('/api/config/subtitles', { method: 'PUT', body: JSON.stringify(style) });
 
 // Libraries
 export const getLibraries = () => fetchAPI('/api/libraries');
+export const getLibraryMediaStats = () => fetchAPI('/api/libraries/media-stats');
 export const addLibrary = (data: { name: string; path: string; scan_mode?: string }) =>
   fetchAPI('/api/libraries', { method: 'POST', body: JSON.stringify(data) });
 export const updateLibrary = (id: string, data: Record<string, unknown>) =>
@@ -30,6 +41,8 @@ export const deleteLibrary = (id: string) =>
   fetchAPI(`/api/libraries/${id}`, { method: 'DELETE' });
 export const browseDirectory = (path: string) =>
   fetchAPI(`/api/libraries/browse?path=${encodeURIComponent(path)}`);
+export const updateLibraryStyles = (id: string) =>
+  fetchAPI(`/api/libraries/${id}/update-styles`, { method: 'POST' });
 
 // Tasks
 export const getTasks = () => fetchAPI('/api/tasks');
@@ -51,3 +64,4 @@ export const getOllamaModels = (baseUrl: string) =>
   fetchAPI(`/api/ai/ollama-models?base_url=${encodeURIComponent(baseUrl)}`);
 export const getLanguages = () => fetchAPI('/api/ai/languages');
 export const getAIContentTypes = () => fetchAPI('/api/ai/content-types');
+export const getAIUsage = () => fetchAPI('/api/ai/usage');

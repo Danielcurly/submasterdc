@@ -18,7 +18,8 @@ from core.models import (
     TranslationConfig,
     ExportConfig,
     VADParameters,
-    LibraryFolder
+    LibraryFolder,
+    SubtitleStyleConfig
 )
 
 
@@ -148,6 +149,9 @@ class AppConfig:
     # Export configuration
     export: ExportConfig = field(default_factory=ExportConfig)
     
+    # Subtitle Style configuration
+    subtitle_style: SubtitleStyleConfig = field(default_factory=SubtitleStyleConfig)
+    
     # Content type
     content_type: ContentType = ContentType.MOVIE
     
@@ -159,6 +163,32 @@ class AppConfig:
     
     # Provider configs
     provider_configs: Dict[str, ProviderConfig] = field(default_factory=dict)
+
+    # Log level (off, normal, debug)
+    log_level: str = 'normal'
+    
+    def validate(self):
+        """
+        Validate configuration for logical consistency and constraints.
+        Raises ValueError if validation fails.
+        """
+        # 1. Check for language collisions (Point 1.3 in program_description.md)
+        if self.translation.enabled and self.translation.tasks:
+            extensions = []
+            for task in self.translation.tasks:
+                if task.bilingual_subtitles:
+                    # For bilingual, the code depends on the filename_code setting
+                    code = task.target_language if task.bilingual_filename_code == 'primary' else task.secondary_language
+                else:
+                    code = task.target_language
+                
+                if code in extensions:
+                    raise ValueError(f"Configuration Conflict: Multiple tasks would generate the same file extension '.{code}'. "
+                                     f"Please ensure each task uses a unique target language or bilingual suffix.")
+                extensions.append(code)
+        
+        # 2. Add other validations as needed
+        return True
     
     def get_vad_parameters(self) -> VADParameters:
         """Get VAD parameters for current content type"""
@@ -201,7 +231,9 @@ class AppConfig:
             'libraries': [l.to_dict() for l in self.libraries],
             'provider_configs': {
                 k: v.to_dict() for k, v in self.provider_configs.items()
-            }
+            },
+            'subtitle_style': self.subtitle_style.to_dict(),
+            'log_level': self.log_level
         }
     
     @classmethod
@@ -251,14 +283,20 @@ class AppConfig:
         libraries_data = data.get('libraries', [])
         libraries = [LibraryFolder.from_dict(l) for l in libraries_data]
         
+        # Parse subtitle style
+        subtitle_style_data = data.get('subtitle_style', {})
+        subtitle_style = SubtitleStyleConfig.from_dict(subtitle_style_data)
+        
         return cls(
             whisper=whisper,
             translation=translation,
             export=export,
+            subtitle_style=subtitle_style,
             content_type=content_type,
             current_provider=data.get('current_provider', 'Ollama (Local)'),
             libraries=libraries,
-            provider_configs=provider_configs
+            provider_configs=provider_configs,
+            log_level=data.get('log_level', 'normal')
         )
 
 
@@ -334,13 +372,17 @@ class ConfigManager:
                     'enabled': config_dict.get('enable_translation', 'false') == 'true',
                     'tasks': tasks,
                     'max_lines_per_batch': int(config_dict.get('max_lines_per_batch', 500)),
-                    'max_daily_calls': int(config_dict.get('max_daily_calls', 0))
+                    'max_daily_calls': int(config_dict.get('max_daily_calls', 0)),
+                    'max_retries': int(config_dict.get('max_retries', 3)),
+                    'timeout': int(config_dict.get('timeout', 180))
                 },
                 'export': json.loads(config_dict.get('export_formats', '{"formats": ["ass"]}')),
                 'content_type': config_dict.get('content_type', 'movie'),
                 'current_provider': config_dict.get('current_provider', 'Ollama (Local)'),
                 'libraries': libraries,
-                'provider_configs': json.loads(config_dict.get('provider_configs', '{}'))
+                'provider_configs': json.loads(config_dict.get('provider_configs', '{}')),
+                'subtitle_style': json.loads(config_dict.get('subtitle_style', '{}')),
+                'log_level': config_dict.get('log_level', 'normal')
             }
             
             # Update cache after loading
@@ -358,6 +400,9 @@ class ConfigManager:
         Returns:
             bool: True if execution occurred, False if no changes
         """
+        # Validate before saving
+        config.validate()
+        
         # Compare with last saved config to avoid redundant operations
         new_config_dict = config.to_dict()
         
@@ -377,6 +422,8 @@ class ConfigManager:
                 'translation_tasks': json.dumps([t.to_dict() for t in config.translation.tasks]),
                 'max_lines_per_batch': str(config.translation.max_lines_per_batch),
                 'max_daily_calls': str(config.translation.max_daily_calls),
+                'max_retries': str(config.translation.max_retries),
+                'timeout': str(config.translation.timeout),
                 'export_formats': json.dumps(config.export.to_dict(), ensure_ascii=False),
                 'content_type': config.content_type.value if isinstance(config.content_type, ContentType) else config.content_type,
                 'current_provider': config.current_provider,
@@ -384,7 +431,9 @@ class ConfigManager:
                 'provider_configs': json.dumps(
                     {k: v.to_dict() for k, v in config.provider_configs.items()},
                     ensure_ascii=False
-                )
+                ),
+                'subtitle_style': json.dumps(config.subtitle_style.to_dict(), ensure_ascii=False),
+                'log_level': config.log_level
             }
             
             for key, value in flat_config.items():
@@ -394,6 +443,10 @@ class ConfigManager:
                 )
             
             conn.commit()
+            
+            # Apply log level on save
+            from core.logger import set_log_level
+            set_log_level(config.log_level)
             
             # Update cache after successful save
             self._last_saved_config_dict = copy.deepcopy(new_config_dict)
@@ -405,6 +458,72 @@ class ConfigManager:
             raise
         finally:
             conn.close()
+
+
+    def get_daily_usage(self) -> int:
+        """
+        Get current daily usage count.
+        Resets to 0 if the date has changed.
+        """
+        from datetime import date
+        today = str(date.today())
+        
+        conn = self.get_db()
+        try:
+            cursor = conn.execute("SELECT value FROM config WHERE key = 'daily_usage_date'")
+            row = cursor.fetchone()
+            stored_date = row[0] if row else ""
+            
+            if stored_date != today:
+                # New day, reset counter and update date
+                conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('daily_usage_date', ?)", (today,))
+                conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('daily_usage_count', '0')")
+                conn.commit()
+                return 0
+            
+            cursor = conn.execute("SELECT value FROM config WHERE key = 'daily_usage_count'")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        except Exception as e:
+            print(f"Error getting daily usage: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def increment_daily_usage(self, amount: int = 1):
+        """Increment daily usage count"""
+        from datetime import date
+        today = str(date.today())
+        
+        conn = self.get_db()
+        try:
+            # First ensure date is correct (atomic reset if today changed)
+            cursor = conn.execute("SELECT value FROM config WHERE key = 'daily_usage_date'")
+            row = cursor.fetchone()
+            stored_date = row[0] if row else ""
+            
+            if stored_date != today:
+                conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('daily_usage_date', ?)", (today,))
+                conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('daily_usage_count', ?)", (str(amount),))
+            else:
+                cursor = conn.execute("SELECT value FROM config WHERE key = 'daily_usage_count'")
+                row = cursor.fetchone()
+                current = int(row[0]) if row else 0
+                conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('daily_usage_count', ?)", (str(current + amount),))
+            conn.commit()
+        except Exception as e:
+            print(f"Error incrementing daily usage: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def get_usage_info(self) -> Dict[str, int]:
+        """Get summary of used vs limit"""
+        config = self.load()
+        return {
+            "used": self.get_daily_usage(),
+            "limit": config.translation.max_daily_calls
+        }
 
 
 # ============================================================================

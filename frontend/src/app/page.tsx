@@ -2,10 +2,10 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getLibraries, getTasks, triggerScan, clearCompleted, retryTask, cancelTask, cancelAllTasks, getTaskStats } from '@/lib/api';
+import { getLibraries, getTasks, triggerScan, clearCompleted, retryTask, cancelTask, cancelAllTasks, getTaskStats, updateLibraryStyles, getLibraryMediaStats } from '@/lib/api';
 import {
   LayoutDashboard, FolderOpen, ListTodo, Clock, CheckCircle2, AlertCircle,
-  Play, RefreshCw, Trash2, RotateCcw, FileVideo, Loader2, XCircle, Eye, EyeOff
+  Play, RefreshCw, Trash2, RotateCcw, FileVideo, Loader2, XCircle, Eye, EyeOff, Search, FileText, List
 } from 'lucide-react';
 
 interface Library { id: string; name: string; path: string; scan_mode: string; path_exists: boolean; }
@@ -15,18 +15,23 @@ export default function HomePage() {
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [stats, setStats] = useState({ pending: 0, processing: 0, completed: 0, failed: 0 });
+  const [mediaStats, setMediaStats] = useState({ generated_subs: 0, embedded_subs: 0, existing_ass: 0, existing_ass_list: [] as any[] });
   const [scanning, setScanning] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<string | null>(null);
   const [hideParams, setHideParams] = useState({ completed: false, failed: false, skipped: false, pending: false, cancelled: false, permission_error: false });
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showAssModal, setShowAssModal] = useState(false);
+  const [assSearchQuery, setAssSearchQuery] = useState('');
   const { t } = useLanguage();
 
   const load = useCallback(async () => {
     try {
-      const [libs, t, s] = await Promise.all([getLibraries(), getTasks(), getTaskStats()]);
+      const [libs, t, s, ms] = await Promise.all([getLibraries(), getTasks(), getTaskStats(), getLibraryMediaStats()]);
       setLibraries(libs);
       setStats(s);
+      setMediaStats(ms);
       const order: Record<string, number> = { processing: 0, pending: 1, failed: 2, skipped: 3, completed: 4, cancelled: 5 };
       t.sort((a: Task, b: Task) => (order[a.status] ?? 4) - (order[b.status] ?? 4));
       setTasks(t);
@@ -51,6 +56,16 @@ export default function HomePage() {
       await load();
     } catch (e: unknown) { setScanResult(`Error: ${e instanceof Error ? e.message : 'Unknown'}`); }
     finally { setScanning(null); }
+  };
+
+  const handleUpdateStyles = async (id: string, name: string) => {
+    try {
+      const res = await updateLibraryStyles(id);
+      setScanResult(res.message || t('Style update queued for {name}').replace('{name}', name));
+      await load();
+    } catch (e: unknown) {
+      setScanResult(`Error: ${e instanceof Error ? e.message : 'Unknown'}`);
+    }
   };
 
   const statusChip = (status: string) => {
@@ -81,6 +96,7 @@ export default function HomePage() {
     if (hideParams.skipped && task.status === 'skipped') return false;
     if (hideParams.pending && task.status === 'pending') return false;
     if (hideParams.cancelled && task.status === 'cancelled') return false;
+    if (searchQuery && !task.file_path.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
   });
 
@@ -105,7 +121,7 @@ export default function HomePage() {
         <p className="page-subtitle">{t('Monitor your task queue and trigger library scans.')}</p>
       </div>
 
-      {/* Stats */}
+      {/* Global Library Stats */}
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-icon" style={{ background: 'var(--accent-primary-soft)', color: 'var(--accent-primary)' }}>
@@ -117,31 +133,39 @@ export default function HomePage() {
           </div>
         </div>
         <div className="stat-card">
-          <div className="stat-icon" style={{ background: 'var(--accent-amber-soft)', color: 'var(--accent-amber)' }}>
-            <Clock size={22} />
+          <div className="stat-icon" style={{ background: 'var(--accent-green-soft)', color: 'var(--accent-green)' }}>
+            <FileText size={22} />
           </div>
           <div>
-            <div className="stat-value">{stats.pending}</div>
-            <div className="stat-label">{t('Pending')}</div>
+            <div className="stat-value">{mediaStats.generated_subs}</div>
+            <div className="stat-label">{t('Generated Subs')}</div>
           </div>
         </div>
         <div className="stat-card">
           <div className="stat-icon" style={{ background: 'var(--accent-blue-soft)', color: 'var(--accent-blue)' }}>
-            <Loader2 size={22} />
+            <FileVideo size={22} />
           </div>
           <div>
-            <div className="stat-value">{stats.processing}</div>
-            <div className="stat-label">{t('Processing')}</div>
+            <div className="stat-value">{mediaStats.embedded_subs}</div>
+            <div className="stat-label">{t('Embedded Subs')}</div>
           </div>
         </div>
-        <div className="stat-card">
-          <div className="stat-icon" style={{ background: 'var(--accent-green-soft)', color: 'var(--accent-green)' }}>
-            <CheckCircle2 size={22} />
+        <div className="stat-card" style={{ position: 'relative' }}>
+          <div className="stat-icon" style={{ background: 'var(--accent-amber-soft)', color: 'var(--accent-amber)' }}>
+            <FileText size={22} />
           </div>
           <div>
-            <div className="stat-value">{stats.completed}</div>
-            <div className="stat-label">{t('Completed')}</div>
+            <div className="stat-value">{mediaStats.existing_ass}</div>
+            <div className="stat-label">{t('External Subs')}</div>
           </div>
+          <button
+            className="btn btn-ghost btn-sm btn-icon"
+            onClick={() => setShowAssModal(true)}
+            style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', padding: 6 }}
+            title={t('View List')}
+          >
+            <List size={20} style={{ color: 'var(--text-muted)' }} />
+          </button>
         </div>
       </div>
 
@@ -165,28 +189,38 @@ export default function HomePage() {
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
               {libraries.map(lib => (
                 <div key={lib.id} className="card" style={{ width: 320, flexShrink: 0 }}>
-                  <div className="card-header">
-                    <div className="card-icon purple"><FolderOpen size={18} /></div>
-                    <div style={{ flex: 1 }}>
-                      <strong>{lib.name}</strong>
-                      <p className="text-caption text-mono" style={{ marginTop: 2 }}>{lib.path}</p>
+                  <div className="card-header" style={{ alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flex: 1, minWidth: 0 }}>
+                      <div className="card-icon purple" style={{ flexShrink: 0 }}><FolderOpen size={18} /></div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <strong style={{ fontSize: '15px', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{lib.name}</strong>
+                        <p className="text-caption text-mono" style={{ marginTop: 2, fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{lib.path}</p>
+                      </div>
                     </div>
+                    <span className="chip chip-gray" style={{ flexShrink: 0, fontSize: '11px', padding: '2px 8px', textTransform: 'capitalize' }}>{t(lib.scan_mode)}</span>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
-                    <span className="chip chip-gray">{t(lib.scan_mode)}</span>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                    <button
+                      className="btn btn-primary"
+                      style={{ flex: 1, padding: '8px 4px', fontSize: '13px' }}
+                      onClick={() => handleScan(lib.path)}
+                      disabled={scanning === lib.path}
+                    >
+                      {scanning === lib.path ? (
+                        <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('Scanning...')}</>
+                      ) : (
+                        <><Play size={14} /> {t('Analyze')}</>
+                      )}
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ flex: 1, padding: '8px 4px', fontSize: '13px', backgroundColor: 'var(--bg-card-hover)' }}
+                      onClick={() => handleUpdateStyles(lib.id, lib.name)}
+                      title={t('Apply current subtitle styles to all generated subtitles in this library')}
+                    >
+                      <RefreshCw size={14} /> {t('Update Styles')}
+                    </button>
                   </div>
-                  <button
-                    className="btn btn-primary btn-block"
-                    style={{ marginTop: 14 }}
-                    onClick={() => handleScan(lib.path)}
-                    disabled={scanning === lib.path}
-                  >
-                    {scanning === lib.path ? (
-                      <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('Scanning...')}</>
-                    ) : (
-                      <><Play size={14} /> {t('Analyze Now')}</>
-                    )}
-                  </button>
                 </div>
               ))}
             </div>
@@ -197,10 +231,50 @@ export default function HomePage() {
 
         {/* Task Queue */}
         <div className="section">
-          <div className="section-header" style={{ gap: 10 }}>
+          <div className="section-header" style={{ gap: 10, marginBottom: 16 }}>
             <div className="section-title">
               <ListTodo size={18} className="section-title-icon" />
               <h2>{t('Processing Queue')}</h2>
+            </div>
+          </div>
+
+          {/* Queue Stats Row */}
+          <div className="stats-grid" style={{ marginBottom: 20, gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+            <div className="stat-card" style={{ padding: '12px 16px', minHeight: 'auto', gap: 12 }}>
+              <div className="stat-icon" style={{ background: 'var(--accent-amber-soft)', color: 'var(--accent-amber)', width: 36, height: 36 }}>
+                <Clock size={18} />
+              </div>
+              <div>
+                <div className="stat-value" style={{ fontSize: 20 }}>{stats.pending}</div>
+                <div className="stat-label" style={{ fontSize: 12 }}>{t('Pending')}</div>
+              </div>
+            </div>
+            <div className="stat-card" style={{ padding: '12px 16px', minHeight: 'auto', gap: 12 }}>
+              <div className="stat-icon" style={{ background: 'var(--accent-blue-soft)', color: 'var(--accent-blue)', width: 36, height: 36 }}>
+                <Loader2 size={18} />
+              </div>
+              <div>
+                <div className="stat-value" style={{ fontSize: 20 }}>{stats.processing}</div>
+                <div className="stat-label" style={{ fontSize: 12 }}>{t('Processing')}</div>
+              </div>
+            </div>
+            <div className="stat-card" style={{ padding: '12px 16px', minHeight: 'auto', gap: 12 }}>
+              <div className="stat-icon" style={{ background: 'var(--accent-green-soft)', color: 'var(--accent-green)', width: 36, height: 36 }}>
+                <CheckCircle2 size={18} />
+              </div>
+              <div>
+                <div className="stat-value" style={{ fontSize: 20 }}>{stats.completed}</div>
+                <div className="stat-label" style={{ fontSize: 12 }}>{t('Completed')}</div>
+              </div>
+            </div>
+            <div className="stat-card" style={{ padding: '12px 16px', minHeight: 'auto', gap: 12 }}>
+              <div className="stat-icon" style={{ background: 'var(--accent-red-soft)', color: 'var(--accent-red)', width: 36, height: 36 }}>
+                <AlertCircle size={18} />
+              </div>
+              <div>
+                <div className="stat-value" style={{ fontSize: 20 }}>{tasks.filter(t => t.status === 'failed' || t.status === 'permission_error' || t.status === 'quota_exhausted').length}</div>
+                <div className="stat-label" style={{ fontSize: 12 }}>{t('Failed')}</div>
+              </div>
             </div>
           </div>
 
@@ -263,13 +337,44 @@ export default function HomePage() {
               {hideParams.cancelled ? <EyeOff size={14} /> : <Eye size={14} />} {t('Cancelled')}
             </button>
 
-            <button
-              className="btn btn-sm"
-              style={{ backgroundColor: 'var(--accent-red-soft)', color: 'var(--accent-red)', borderColor: 'var(--accent-red)', marginLeft: 'auto' }}
-              onClick={() => cancelAllTasks().then(load)}
-            >
-              <XCircle size={14} /> {t('Cancel All')}
-            </button>
+            <div style={{ position: 'relative', flex: 1, minWidth: '200px', maxWidth: '400px', marginLeft: 12 }}>
+              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                className="form-input"
+                placeholder={t('Search tasks...')}
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
+                style={{ paddingLeft: 32, height: '32px', fontSize: '13px' }}
+              />
+            </div>
+
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: '12px',
+                backgroundColor: 'var(--bg-card-hover)',
+                padding: '4px 10px',
+                borderRadius: '20px',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-main)',
+                fontWeight: 500
+              }}>
+                <ListTodo size={14} style={{ color: 'var(--accent-blue)' }} />
+                <span>{filteredTasks.length}</span>
+                <span style={{ opacity: 0.7, fontSize: '11px' }}>{t('tasks found')}</span>
+              </div>
+
+              <button
+                className="btn btn-sm"
+                style={{ backgroundColor: 'var(--accent-red-soft)', color: 'var(--accent-red)', borderColor: 'var(--accent-red)' }}
+                onClick={() => cancelAllTasks().then(load)}
+              >
+                <XCircle size={14} /> {t('Cancel All')}
+              </button>
+            </div>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -300,7 +405,7 @@ export default function HomePage() {
                             <XCircle size={14} />
                           </button>
                         )}
-                        {(task.status === 'failed' || task.status === 'permission_error' || task.status === 'quota_exhausted') && (
+                        {(task.status === 'failed' || task.status === 'permission_error' || task.status === 'quota_exhausted' || task.status === 'cancelled' || task.status === 'skipped') && (
                           <button className="btn btn-sm btn-icon" onClick={() => retryTask(task.id).then(load)} title={t("Retry")} style={{ color: 'var(--accent-amber)', padding: 4 }}>
                             <RotateCcw size={14} />
                           </button>
@@ -377,6 +482,57 @@ export default function HomePage() {
           </button>
         </div>
       </div>
+
+      {/* Existing ASS Modal */}
+      {showAssModal && (
+        <div className="modal-overlay" onClick={() => setShowAssModal(false)}>
+          <div className="modal-content" style={{ maxWidth: 700, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{t('External Subs')}</h2>
+              <button className="btn btn-icon btn-ghost" onClick={() => setShowAssModal(false)}>
+                <XCircle size={20} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 16, overflow: 'hidden' }}>
+              <div style={{ position: 'relative' }}>
+                <Search size={16} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ paddingLeft: 36 }}
+                  placeholder={t('Search files...')}
+                  value={assSearchQuery}
+                  onChange={e => setAssSearchQuery(e.target.value)}
+                />
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1, border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}>
+                {mediaStats.existing_ass_list.filter(item =>
+                  !assSearchQuery ||
+                  item.file_name.toLowerCase().includes(assSearchQuery.toLowerCase()) ||
+                  item.rel_path.toLowerCase().includes(assSearchQuery.toLowerCase()) ||
+                  item.library_name.toLowerCase().includes(assSearchQuery.toLowerCase())
+                ).map((item, i) => (
+                  <div key={i} style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                    <div style={{ fontWeight: 500, fontSize: 14, color: 'var(--text-main)', marginBottom: 4, wordBreak: 'break-all' }}>
+                      {item.file_name}
+                    </div>
+                    <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+                      <span className="chip chip-gray" style={{ fontSize: 11, padding: '2px 8px' }}>{item.library_name}</span>
+                      <span className="text-mono" style={{ opacity: 0.8, paddingTop: 2 }}>{item.rel_path}</span>
+                    </div>
+                  </div>
+                ))}
+                {mediaStats.existing_ass_list.length === 0 && (
+                  <div className="empty-state" style={{ padding: 40 }}>
+                    <FileText size={32} style={{ color: 'var(--text-muted)', marginBottom: 12, opacity: 0.5 }} />
+                    <p style={{ color: 'var(--text-muted)' }}>{t('No existing ASS subtitles found.')}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

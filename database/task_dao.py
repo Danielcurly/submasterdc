@@ -16,7 +16,7 @@ class TaskDAO:
     """Task Data Access Object"""
     
     @staticmethod
-    def add_task(file_path: str, params: Optional[str] = None, force_failed_retry: bool = False) -> Tuple[bool, str]:
+    def add_task(file_path: str, params: Optional[str] = None, force_failed_retry: bool = False, is_manual: bool = False) -> Tuple[bool, str]:
         """
         Add a new task
         
@@ -24,6 +24,7 @@ class TaskDAO:
             file_path: File path
             params: Optional manual task parameters as JSON string
             force_failed_retry: Whether to force re-queuing of failed/cancelled tasks
+            is_manual: Whether the task was explicitly added by the user manually
         
         Returns:
             (Success flag, Message)
@@ -40,17 +41,31 @@ class TaskDAO:
                     return False, "Task is already being processed"
                 
                 if status in ('completed', 'skipped'):
-                    # If config hasn't changed since last run, skip silently
-                    if stored_params == params or params is None:
+                    # Style updates must always be re-runnable
+                    is_style_update = False
+                    if params:
+                        try:
+                            import json as _json
+                            is_style_update = _json.loads(params).get('action') == 'update_style'
+                        except: pass
+                    
+                    # If config hasn't changed since last run AND it's not a manual task, skip silently
+                    if not is_manual and (stored_params == params) and not is_style_update:
                         return False, "Task already processed"
-                    # Config changed — re-evaluate this file
+                        
+                    # Config changed, style update, or explicit manual generation — re-evaluate this file
                     conn.execute(
-                        "UPDATE tasks SET status = 'pending', progress = 0, log = 'Re-evaluating (config changed)...', "
+                        "UPDATE tasks SET status = 'pending', progress = 0, log = 'Re-queuing (manual or config changed)...', "
                         "params = ?, hidden = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (params, task_id)
                     )
                     conn.commit()
-                    return True, "Task re-queued (config changed)"
+                    try:
+                        from core.worker import trigger_worker_event
+                        trigger_worker_event()
+                    except ImportError:
+                        pass
+                    return True, "Task re-queued"
                 
                 if status in ('failed', 'cancelled', 'quota_exhausted') and not force_failed_retry:
                     # Don't re-queue failed tasks during automatic scans
@@ -63,6 +78,11 @@ class TaskDAO:
                     (params, task_id)
                 )
                 conn.commit()
+                try:
+                    from core.worker import trigger_worker_event
+                    trigger_worker_event()
+                except ImportError:
+                    pass
                 return True, "Task updated to pending"
             
             # Create new task
@@ -71,6 +91,11 @@ class TaskDAO:
                 (file_path, params)
             )
             conn.commit()
+            try:
+                from core.worker import trigger_worker_event
+                trigger_worker_event()
+            except ImportError:
+                pass
             return True, "Task added"
         except Exception as e:
             print(f"[TaskDAO] Failed to add task: {e}")
@@ -110,6 +135,32 @@ class TaskDAO:
             return True
         except Exception as e:
             print(f"[TaskDAO] Failed to cancel task {task_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def cancel_task_by_path(file_path: str) -> bool:
+        """
+        Cancel a pending task by file path (used when a file is deleted).
+        
+        Args:
+            file_path: Path of the file whose task should be cancelled
+            
+        Returns:
+            Success flag
+        """
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE tasks SET status='cancelled', log='File deleted', updated_at=CURRENT_TIMESTAMP "
+                "WHERE file_path=? AND status IN ('pending', 'processing')",
+                (file_path,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"[TaskDAO] Failed to cancel task for path {file_path}: {e}")
             return False
         finally:
             conn.close()
@@ -185,7 +236,7 @@ class TaskDAO:
         try:
             result = conn.execute(
                 "SELECT id, file_path, status, progress, log, params, created_at, updated_at "
-                "FROM tasks WHERE status='pending' LIMIT 1"
+                "FROM tasks WHERE status='pending' AND hidden=0 LIMIT 1"
             ).fetchone()
             
             if not result:
@@ -318,11 +369,18 @@ class TaskDAO:
     
     @staticmethod
     def clear_completed_tasks():
-        """Hide all finished tasks from the queue (keeps them for dedup memory)"""
+        """Hide all finished tasks and cancel all pending tasks.
+        Only the currently processing task (if any) remains visible and active."""
         conn = get_db_connection()
         try:
+            # First, cancel all pending tasks so they don't execute without visual feedback
             conn.execute(
-                "UPDATE tasks SET hidden = 1 WHERE status IN ('completed', 'failed', 'skipped', 'cancelled')"
+                "UPDATE tasks SET status = 'cancelled', log = 'Cancelled (queue cleared)', "
+                "hidden = 1, updated_at = CURRENT_TIMESTAMP WHERE status = 'pending'"
+            )
+            # Then hide all other finished tasks
+            conn.execute(
+                "UPDATE tasks SET hidden = 1 WHERE status IN ('completed', 'failed', 'skipped', 'cancelled', 'quota_exhausted', 'permission_error')"
             )
             conn.commit()
         except Exception as e:
@@ -367,13 +425,37 @@ class TaskDAO:
         conn = get_db_connection()
         try:
             result = conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status=?",
+                "SELECT COUNT(*) FROM tasks WHERE status=? AND hidden=0",
                 (status.value,)
             ).fetchone()
             return result[0] if result else 0
         finally:
             conn.close()
     
+    @staticmethod
+    def count_processed_files() -> int:
+        """
+        Count the number of unique media files that have been processed successfully.
+        A file is considered processed if its most recent task was 'completed' or 'skipped'
+        (meaning it met all requirements or subtitles were successfully generated).
+        
+        Returns:
+            Number of unique fully processed media files.
+        """
+        conn = get_db_connection()
+        try:
+            # We count unique file paths that have at least one task in completed/skipped
+            # AND which hasn't been hidden (cleared) by the user in the UI.
+            result = conn.execute(
+                "SELECT COUNT(DISTINCT file_path) FROM tasks WHERE status IN ('completed', 'skipped') AND hidden=0"
+            ).fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            print(f"[TaskDAO] Failed to count processed files: {e}")
+            return 0
+        finally:
+            conn.close()
+            
     @staticmethod
     def has_processing_task() -> bool:
         """
@@ -384,3 +466,26 @@ class TaskDAO:
         """
         count = TaskDAO.get_task_count_by_status(TaskStatus.PROCESSING)
         return count > 0
+
+    @staticmethod
+    def reset_stuck_processing_tasks() -> int:
+        """
+        Reset tasks that are stuck in 'processing' state (e.g., after an unexpected shutdown)
+        back to 'pending' so they can be picked up again by the worker.
+        
+        Returns:
+            Number of tasks reset.
+        """
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE tasks SET status = 'pending', progress = 0, log = 'Reset after unexpected shutdown', updated_at = CURRENT_TIMESTAMP WHERE status = 'processing'"
+            )
+            conn.commit()
+            return cursor.rowcount
+        except Exception as e:
+            conn.rollback()
+            print(f"[TaskDAO] Failed to reset stuck processing tasks: {e}")
+            return 0
+        finally:
+            conn.close()

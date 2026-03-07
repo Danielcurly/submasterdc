@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { getConfig, saveConfig, getLanguages } from '@/lib/api';
-import { Languages, Plus, X, FileText, Save } from 'lucide-react';
+import { Languages, Plus, X, Save } from 'lucide-react';
 
 interface TranslationTask {
     target_language: string;
@@ -16,7 +16,7 @@ export default function TranslationPage() {
     const [config, setConfig] = useState<Record<string, any> | null>(null);
     const [tasks, setTasks] = useState<TranslationTask[]>([]);
     const [batchSize, setBatchSize] = useState(500);
-    const [formats, setFormats] = useState<string[]>(['ass']);
+
     const [langMap, setLangMap] = useState<Record<string, string>>({});
     const [langOptions, setLangOptions] = useState<string[]>([]);
     const defaultTask: TranslationTask = {
@@ -38,9 +38,7 @@ export default function TranslationPage() {
             setTasks(cfg.translation?.tasks ?? []);
             setBatchSize(cfg.translation?.max_lines_per_batch ?? 500);
 
-            // Force single format if multiple were saved previously
-            const savedFormats = cfg.export?.formats ?? ['ass'];
-            setFormats(savedFormats.length > 0 ? [savedFormats[0]] : ['ass']);
+
 
             setLangMap(langs.iso_map);
             setLangOptions(langs.target_options);
@@ -56,12 +54,11 @@ export default function TranslationPage() {
             const newConfig = {
                 ...config,
                 translation: { ...config.translation, enabled: true, tasks, max_lines_per_batch: batchSize },
-                export: { ...config.export, formats },
             };
             await saveConfig(newConfig);
-            setMessage('Settings saved successfully!');
+            setMessage(t('Settings saved successfully!'));
             setTimeout(() => setMessage(''), 3000);
-        } catch (e: unknown) { setMessage(`Error: ${e instanceof Error ? e.message : 'Unknown'}`); }
+        } catch (e: unknown) { setMessage(`${t('Error')}: ${e instanceof Error ? e.message : 'Unknown'}`); }
         finally { setSaving(false); }
     };
 
@@ -106,11 +103,11 @@ export default function TranslationPage() {
                                     </div>
                                     <div style={{ minWidth: 0 }}>
                                         <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text-bright)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                            {langMap[task.target_language] || task.target_language}
+                                            {t(langMap[task.target_language] || task.target_language)}
                                         </h3>
                                         {task.bilingual_subtitles && (
                                             <span className="chip chip-green" style={{ marginTop: 4, display: 'inline-block', fontSize: 10, padding: '2px 6px', fontWeight: 600 }}>
-                                                BILINGUAL (+{langMap[task.secondary_language] || task.secondary_language})
+                                                {t('BILINGUAL')} (+{t(langMap[task.secondary_language] || task.secondary_language)})
                                             </span>
                                         )}
                                     </div>
@@ -124,13 +121,13 @@ export default function TranslationPage() {
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 'auto', fontSize: 13, color: 'var(--text-muted)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                     <span>{t('Target Lang')}:</span>
-                                    <strong style={{ color: 'var(--text)' }}>{langMap[task.target_language] || task.target_language} ({task.target_language})</strong>
+                                    <strong style={{ color: 'var(--text)' }}>{t(langMap[task.target_language] || task.target_language)} ({task.target_language})</strong>
                                 </div>
                                 {task.bilingual_subtitles && (
                                     <>
                                         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                             <span>{t('Secondary Lang')}:</span>
-                                            <strong style={{ color: 'var(--text)' }}>{langMap[task.secondary_language] || task.secondary_language} ({task.secondary_language})</strong>
+                                            <strong style={{ color: 'var(--text)' }}>{t(langMap[task.secondary_language] || task.secondary_language)} ({task.secondary_language})</strong>
                                         </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                                             <span>{t('Suffix Code')}:</span>
@@ -164,52 +161,7 @@ export default function TranslationPage() {
                 <input type="number" className="form-input" value={batchSize} min={50} max={5000} step={50} onChange={e => setBatchSize(Number(e.target.value))} />
             </div>
 
-            <hr className="divider" />
 
-            {/* Formats */}
-            <div className="section">
-                <div className="section-header">
-                    <div className="section-title">
-                        <FileText size={18} className="section-title-icon" />
-                        <h2>{t('Subtitle Formats')}</h2>
-                    </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: 16 }}>
-                    {[
-                        { id: 'srt', label: 'SRT (' + t('Universal') + ')', desc: t('Widest compatibility, plain text.') },
-                        { id: 'ass', label: 'ASS (' + t('Advanced') + ')', desc: t('Supports rich styles and position.') },
-                    ].map(f => {
-                        const isChecked = formats.includes(f.id);
-                        return (
-                            <label key={f.id} className="card" style={{
-                                flex: 1,
-                                cursor: 'pointer',
-                                display: 'flex',
-                                gap: 12,
-                                alignItems: 'center',
-                                borderColor: isChecked ? 'var(--accent-primary)' : undefined,
-                                background: isChecked ? 'var(--bg-hover)' : undefined,
-                                transition: 'all 0.2s ease'
-                            }}>
-                                <input
-                                    type="radio"
-                                    name="subtitle_format"
-                                    checked={isChecked}
-                                    onChange={() => setFormats([f.id])}
-                                    style={{ accentColor: 'var(--accent-primary)', width: 18, height: 18 }}
-                                />
-                                <div style={{ flex: 1 }}>
-                                    <div style={{ fontWeight: 600, color: isChecked ? 'var(--text-bright)' : 'var(--text-primary)' }}>{f.label}</div>
-                                    <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>{f.desc}</p>
-                                </div>
-                            </label>
-                        );
-                    })}
-                </div>
-            </div>
-
-            <h2 className="divider" />
 
             <button className="btn btn-primary btn-block" onClick={handleSave} disabled={saving}>
                 <Save size={15} /> {saving ? t('Saving...') : t('Save Settings')}
@@ -252,7 +204,7 @@ export default function TranslationPage() {
                                     value={newTask.target_language}
                                     onChange={e => setNewTask({ ...newTask, target_language: e.target.value })}
                                 >
-                                    {langOptions.map(c => <option key={c} value={c}>{langMap[c] || c}</option>)}
+                                    {langOptions.map(c => <option key={c} value={c}>{t(langMap[c] || c)}</option>)}
                                 </select>
                             </div>
 
@@ -270,7 +222,7 @@ export default function TranslationPage() {
                                             value={newTask.secondary_language}
                                             onChange={e => setNewTask({ ...newTask, secondary_language: e.target.value })}
                                         >
-                                            {langOptions.map(c => <option key={c} value={c}>{langMap[c] || c}</option>)}
+                                            {langOptions.map(c => <option key={c} value={c}>{t(langMap[c] || c)}</option>)}
                                         </select>
                                     </div>
                                     <div className="form-group" style={{ marginBottom: 0 }}>

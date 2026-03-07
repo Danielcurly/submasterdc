@@ -1,69 +1,71 @@
 """Config API Router — Load and save application configuration"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Dict, Any
 
 from core.config import ConfigManager, LLM_PROVIDERS, VAD_PRESETS
-from core.models import ContentType
+from core.models import ContentType, StandardResponse
 from database.connection import get_db_connection
+from api.deps import get_config_manager
 
 router = APIRouter()
 
 
-def _get_config_manager():
-    return ConfigManager(get_db_connection)
-
-
-@router.get("")
+@router.get("", response_model=StandardResponse)
 def get_config():
     """Load full application config"""
-    cm = _get_config_manager()
+    cm = get_config_manager()
     config = cm.load()
-    return config.to_dict()
+    return StandardResponse(success=True, message="Config loaded", data=config.to_dict())
 
 
 class ConfigUpdate(BaseModel):
     config: Dict[str, Any]
 
 
-@router.put("")
+@router.put("", response_model=StandardResponse)
 def update_config(body: ConfigUpdate):
     """Save full application config"""
     from core.config import AppConfig
-    cm = _get_config_manager()
+    cm = get_config_manager()
     try:
+        from core.logger import app_logger
         new_config = AppConfig.from_dict(body.config)
         saved = cm.save(new_config)
-        return {"saved": saved, "config": new_config.to_dict()}
+        app_logger.info(f"[ConfigAPI] Configuration saved and applied. Log level: {new_config.log_level}")
+        return StandardResponse(success=True, message="Config saved", data={"saved": saved, "config": new_config.to_dict()})
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return StandardResponse(success=False, message=str(e))
 
 
-@router.get("/providers")
-def get_providers():
-    """Get available LLM providers"""
-    return LLM_PROVIDERS
+@router.get("/subtitles", response_model=StandardResponse)
+def get_subtitle_style():
+    """Get current subtitle style configuration"""
+    cm = get_config_manager()
+    config = cm.load()
+    return StandardResponse(success=True, message="Style loaded", data=config.subtitle_style.to_dict())
 
 
-@router.get("/content-types")
-def get_content_types():
-    """Get content type options with descriptions"""
-    from core.config import get_content_type_display_name, get_content_type_description
-    return [
-        {
-            "value": ct.value,
-            "label": get_content_type_display_name(ct),
-            "description": get_content_type_description(ct)
-        }
-        for ct in ContentType
-    ]
+@router.put("/subtitles", response_model=StandardResponse)
+def update_subtitle_style(style_dict: Dict[str, Any]):
+    """Update subtitle style configuration"""
+    from core.models import SubtitleStyleConfig
+    cm = get_config_manager()
+    try:
+        config = cm.load()
+        config.subtitle_style = SubtitleStyleConfig.from_dict(style_dict)
+        saved = cm.save(config)
+        return StandardResponse(success=True, message="Style updated", data={"saved": saved, "style": config.subtitle_style.to_dict()})
+    except Exception as e:
+        return StandardResponse(success=False, message=str(e))
 
 
-@router.get("/vad-presets")
+@router.get("/vad-presets", response_model=StandardResponse)
 def get_vad_presets():
     """Get VAD parameter presets for each content type"""
-    return {
+    data = {
         ct.value: params.to_dict()
         for ct, params in VAD_PRESETS.items()
     }
+    return StandardResponse(success=True, message="VAD presets loaded", data=data)

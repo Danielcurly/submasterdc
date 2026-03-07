@@ -2,11 +2,9 @@ name: Build and Push Docker Image
 
 # 触发条件：当代码推送到 main 分支，或者发布 Release 时触发
 on:
-  push:
-    branches: [ "main" ]
-    # 如果你也想打 tag 时触发构建，取消下面注释
-    # tags: [ 'v*.*.*' ]
-  workflow_dispatch: # 允许手动点击按钮触发
+#  push:
+#    branches: [ "main" ]
+  workflow_dispatch: # Permite ejecución manual controlada
 
 jobs:
   build:
@@ -43,5 +41,5 @@ jobs:
           push: true
           # 替换成你的 Docker Hub 用户名和仓库名
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:latest
+            ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:v1.0.2
             ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:${{ github.sha }}

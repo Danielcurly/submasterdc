@@ -7,7 +7,15 @@ Central management for all data structures
 
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any, Generic, TypeVar
+from pydantic import BaseModel
+
+T = TypeVar('T')
+
+class StandardResponse(BaseModel, Generic[T]):
+    success: bool
+    message: str
+    data: Optional[T] = None
 
 
 # ============================================================================
@@ -42,6 +50,32 @@ class ContentType(Enum):
     LECTURE = 'lecture'          # Lectures/Courses
     MUSIC = 'music'              # Music Videos/MVs
     CUSTOM = 'custom'            # Custom
+
+
+@dataclass
+class SubtitleStyleConfig:
+    """Subtitle Appearance Configuration"""
+    font_size_step: int = 4  # 1-7 (4 = 22px)
+    primary_color: str = "&H00DFDFDF"
+    secondary_color: str = "&H0000FFFF"
+    target_format: str = "ass"
+    
+    def to_dict(self) -> Dict:
+        return {
+            'font_size_step': self.font_size_step,
+            'primary_color': self.primary_color,
+            'secondary_color': self.secondary_color,
+            'target_format': self.target_format
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'SubtitleStyleConfig':
+        return cls(
+            font_size_step=data.get('font_size_step', 4),
+            primary_color=data.get('primary_color', "&H00DFDFDF"),
+            secondary_color=data.get('secondary_color', "&H0000FFFF"),
+            target_format=data.get('target_format', "ass")
+        )
 
 
 # ============================================================================
@@ -271,7 +305,7 @@ class TranslationConfig:
 
 @dataclass
 class ExportConfig:
-    """Export Config"""
+    """Export Config (Legacy support, style settings moved to SubtitleStyleConfig)"""
     formats: List[str] = field(default_factory=lambda: ['ass'])
     
     def to_dict(self) -> Dict:
@@ -280,12 +314,13 @@ class ExportConfig:
     @classmethod
     def from_dict(cls, data: Dict) -> 'ExportConfig':
         # Ensure only supported formats are loaded
-        formats_data = data.get('formats', ['srt', 'ass'])
+        formats_data = data.get('formats', ['ass'])
         if not isinstance(formats_data, list):
-            formats_data = ['srt', 'ass']
+            formats_data = ['ass']
         formats: List[str] = [str(f) for f in formats_data]
-        if not all(f.lower() in ['srt', 'ass', 'vtt', 'sub'] for f in formats):
-            return cls(formats=['srt', 'ass'])
+        # Only SRT and ASS are supported export formats
+        if not all(f.lower() in ['srt', 'ass'] for f in formats):
+            return cls(formats=['ass'])
         return cls(formats=formats)
 
 
@@ -347,6 +382,7 @@ class MediaFile:
     file_name: str
     file_size: int
     subtitles: List[SubtitleInfo] = field(default_factory=list)
+    embedded_tracks: List[Dict] = field(default_factory=list) # List of {index: int, lang: str}
     has_translated: bool = False
     updated_at: Optional[str] = None
     
@@ -362,6 +398,7 @@ class MediaFile:
             'file_name': self.file_name,
             'file_size': self.file_size,
             'subtitles': [s.to_dict() for s in self.subtitles],
+            'embedded_tracks': self.embedded_tracks,
             'has_subtitle': self.has_subtitle,
             'has_translated': self.has_translated,
             'updated_at': self.updated_at
@@ -376,12 +413,17 @@ class MediaFile:
         
         subtitles = [SubtitleInfo.from_dict(s) for s in subtitles_data]
         
+        embedded_data = data.get('embedded_tracks', [])
+        if isinstance(embedded_data, str):
+            embedded_data = json.loads(embedded_data)
+        
         return cls(
             id=data['id'],
             file_path=data['file_path'],
             file_name=data['file_name'],
             file_size=data['file_size'],
             subtitles=subtitles,
+            embedded_tracks=embedded_data,
             has_translated=data.get('has_translated', False),
             updated_at=data.get('updated_at')
         )

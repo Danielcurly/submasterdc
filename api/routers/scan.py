@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from services.media_scanner import scan_media_directory
+from core.models import StandardResponse
 
 router = APIRouter()
 
@@ -14,16 +15,23 @@ class ScanRequest(BaseModel):
     debug: bool = False
 
 
-@router.post("")
+@router.post("", response_model=StandardResponse)
 def trigger_scan(body: ScanRequest):
     """Trigger a scan on a specific library path"""
     try:
         # Manual scans (triggered via this API) should force-retry failed tasks
         count, logs = scan_media_directory(directory=body.library_path, debug=body.debug, force_failed_retry=True)
-        return {
-            "files_added": count,
-            "logs": logs if body.debug else [],
-            "message": f"Added {count} new media files" if count > 0 else "No new media found"
-        }
+        return StandardResponse(
+            success=True,
+            message="Scan completed",
+            data={
+                "files_added": count,
+                "logs": logs if body.debug else [],
+                "message": f"Added {count} new media files" if count > 0 else "No new media found"
+            }
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return StandardResponse(
+            success=False,
+            message=str(e)
+        )

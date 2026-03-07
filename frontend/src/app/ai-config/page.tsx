@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getConfig, saveConfig, getAIProviders, testAIConnection, getOllamaModels, getAIContentTypes } from '@/lib/api';
+import { getConfig, saveConfig, getAIProviders, testAIConnection, getOllamaModels, getAIContentTypes, getAIUsage } from '@/lib/api';
 import { Cpu, Zap, Save, RefreshCw, CheckCircle2, XCircle, Mic, Loader2 } from 'lucide-react';
 
 interface ContentTypeOption { value: string; label: string; description: string; }
@@ -25,7 +25,13 @@ export default function AIConfigPage() {
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState('');
     const [maxDailyCalls, setMaxDailyCalls] = useState(0);
+    const [usage, setUsage] = useState<{ used: number; limit: number } | null>(null);
     const { t } = useLanguage();
+
+    const fetchUsage = async () => {
+        try { setUsage(await getAIUsage()); }
+        catch (e) { console.error('Failed to fetch usage', e); }
+    };
 
     useEffect(() => {
         Promise.all([getConfig(), getAIProviders(), getAIContentTypes()]).then(([cfg, provs, cts]) => {
@@ -42,6 +48,7 @@ export default function AIConfigPage() {
             if (pc) { setApiKey(pc.api_key || ''); setBaseUrl(pc.base_url || provs[prov]?.base_url || ''); setModelName(pc.model_name || provs[prov]?.model || ''); }
             else if (provs[prov]) { setApiKey(''); setBaseUrl(provs[prov].base_url || ''); setModelName(provs[prov].model || ''); }
         });
+        fetchUsage();
     }, []);
 
     const handleProviderChange = (p: string) => {
@@ -70,6 +77,7 @@ export default function AIConfigPage() {
                 translation: { ...config.translation, max_daily_calls: maxDailyCalls }
             });
             setMessage(t('Configuration saved!'));
+            fetchUsage();
             setTimeout(() => setMessage(''), 3000);
         } catch (e: unknown) { setMessage(`${t('Error')}: ${e instanceof Error ? e.message : 'Unknown'}`); }
         finally { setSaving(false); }
@@ -110,7 +118,7 @@ export default function AIConfigPage() {
                             {Object.keys(providers).map(p => <option key={p} value={p}>{p}</option>)}
                         </select>
                         {providers[selectedProvider]?.help && (
-                            <p className="text-caption" style={{ marginTop: 6 }}>{providers[selectedProvider].help}</p>
+                            <p className="text-caption" style={{ marginTop: 6 }}>{t(providers[selectedProvider].help)}</p>
                         )}
                     </div>
 
@@ -121,18 +129,18 @@ export default function AIConfigPage() {
                     <div className="grid-cols-2">
                         <div className="form-group">
                             <label className="form-label">{t('API Key')}</label>
-                            <input type="password" className="form-input" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-... (key1, key2)" />
+                            <input type="password" className="form-input" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={t('sk-... (key1, key2)')} />
                         </div>
                         <div className="form-group">
                             <label className="form-label">{t('Base URL')}</label>
-                            <input className="form-input" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="url1, url2" />
+                            <input className="form-input" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder={t('url1, url2')} />
                         </div>
                     </div>
 
                     <div className="form-group">
                         <label className="form-label">{t('Model')}</label>
                         <div style={{ display: 'flex', gap: 8 }}>
-                            <input className="form-input" value={modelName} onChange={e => setModelName(e.target.value)} style={{ flex: 1 }} placeholder="model1, model2" />
+                            <input className="form-input" value={modelName} onChange={e => setModelName(e.target.value)} style={{ flex: 1 }} placeholder={t('model1, model2')} />
                             {selectedProvider.includes('Ollama') && (
                                 <button className="btn btn-sm" onClick={async () => setOllamaModels(await getOllamaModels(baseUrl))}>
                                     <RefreshCw size={13} /> {t('Fetch')}
@@ -179,9 +187,16 @@ export default function AIConfigPage() {
                                 onChange={e => setMaxDailyCalls(parseInt(e.target.value) || 0)}
                                 min="0"
                             />
-                            <p className="text-caption" style={{ margin: 0 }}>
-                                {t('0 = Unlimited. Hard cap on daily AI translation requests to avoid unexpected costs.')}
-                            </p>
+                            <div style={{ flex: 1 }}>
+                                <p className="text-caption" style={{ margin: 0 }}>
+                                    {t('0 = Unlimited. Hard cap on daily AI translation requests to avoid unexpected costs.')}
+                                </p>
+                                {usage && (
+                                    <p className="text-caption" style={{ margin: '4px 0 0 0', fontWeight: 'bold', color: 'var(--primary-color)' }}>
+                                        {t('Used')}: {usage.used} / {usage.limit === 0 ? t('Unlimited') : usage.limit} {t('Calls')}
+                                    </p>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -218,13 +233,13 @@ export default function AIConfigPage() {
                             </select>
                         </div>
                         <div className="form-group">
-                            <label className="form-label">{t('CPU Threads')} (N100: 4)</label>
+                            <label className="form-label">{t('CPU Threads')} {t('(N100: 4)')}</label>
                             <input type="number" className="form-input" value={whisperThreads} onChange={e => setWhisperThreads(parseInt(e.target.value) || 1)} min="1" max="64" />
                         </div>
                     </div>
 
                     {contentTypes.find(c => c.value === selectedContentType)?.description && (
-                        <p className="text-caption mt-2">{contentTypes.find(c => c.value === selectedContentType)?.description}</p>
+                        <p className="text-caption mt-2">{t(contentTypes.find(c => c.value === selectedContentType)!.description)}</p>
                     )}
                 </div>
             </div>

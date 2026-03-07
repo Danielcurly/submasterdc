@@ -10,10 +10,12 @@ from typing import Optional, Callable
 import subprocess
 import time
 import numpy as np
+import shlex
 from faster_whisper import WhisperModel
 
 from core.models import WhisperConfig, VADParameters, SubtitleEntry
 from utils.format_utils import format_timestamp
+from core.logger import app_logger
 
 
 class WhisperService:
@@ -23,7 +25,7 @@ class WhisperService:
         self,
         config: WhisperConfig,
         vad_params: VADParameters,
-        model_dir: str = "./data/models"
+        model_dir: str = str(Path(__file__).resolve().parent.parent / "data" / "models")
     ):
         """
         Initialize Whisper service
@@ -52,10 +54,11 @@ class WhisperService:
                 cpu_threads=self.config.cpu_threads,
                 download_root=self.model_dir
             )
-            print(f"[WhisperService] Model loaded: {self.config.model_size} (CPU threads: {self.config.cpu_threads})")
+            app_logger.info(f"[WhisperService] Model loaded: {self.config.model_size} (CPU threads: {self.config.cpu_threads})")
+            app_logger.debug(f"[WhisperService] Full config: {self.config}")
             self.last_activity_time = time.time()
         except Exception as e:
-            print(f"[WhisperService] Failed to load model: {e}")
+            app_logger.error(f"[WhisperService] Failed to load model: {e}")
             raise
             
     def _detect_language_at_offset(self, video_path: str, offset: int) -> Optional[str]:
@@ -68,7 +71,7 @@ class WhisperService:
                 FFMPEG_PATH,
                 '-ss', str(offset),
                 '-t', '30',
-                '-i', video_path,
+                '-i', str(Path(video_path).resolve()),
                 '-f', 's16le',
                 '-acodec', 'pcm_s16le',
                 '-ac', '1',
@@ -88,11 +91,11 @@ class WhisperService:
             
             # Use faster-whisper to transcribe a tiny bit just to get language info
             # We use beam_size=1 and no results just for info
-            _, info = self.model.transcribe(audio_array, beam_size=1, duration=30)
+            _, info = self.model.transcribe(audio_array, beam_size=1)
             
             return info.language
         except Exception as e:
-            print(f"[WhisperService] Language sampling at offset {offset} failed: {e}")
+            app_logger.debug(f"[WhisperService] Language sampling at offset {offset} failed: {e}")
             return None
     
     def extract_subtitle(
@@ -136,6 +139,7 @@ class WhisperService:
             'condition_on_previous_text': True,
             'temperature': [0.0, 0.4],
         }
+        app_logger.debug(f"[WhisperService] Transcribe parameters: {transcribe_params}")
         
         # Specify language if not auto-detect
         if self.config.source_language != 'auto':
@@ -146,9 +150,10 @@ class WhisperService:
             duration = get_video_duration(video_path)
             
             # Points to sample: 0s, 5m (300s), 10m (600s)
+            # Only include points where there's enough audio for a 30s sample
             points = [0]
-            if duration > 300: points.append(300)
-            if duration > 600: points.append(600)
+            if duration > 330: points.append(300)   # Need at least 330s for a 30s sample at 300
+            if duration > 630: points.append(600)   # Need at least 630s for a 30s sample at 600
             
             if progress_callback:
                 progress_callback(8, 100, f"Performing multi-point language detection ({len(points)} samples)...")
@@ -180,6 +185,7 @@ class WhisperService:
             if progress_callback:
                 from utils.format_utils import get_lang_name
                 lang_name = get_lang_name(winner)
+                app_logger.debug(f"[WhisperService] Language detection winner: {winner} ({lang_name})")
                 progress_callback(15, 100, f"Detected language: {lang_name} (via voting)")
         
         try:
@@ -218,7 +224,7 @@ class WhisperService:
             return output_path
         
         except Exception as e:
-            print(f"[WhisperService] Extraction failed: {e}")
+            app_logger.error(f"[WhisperService] Extraction failed: {e}")
             self.last_activity_time = time.time()
             raise
     
@@ -229,7 +235,7 @@ class WhisperService:
             
         idle_time = time.time() - self.last_activity_time
         if idle_time > timeout_seconds:
-            print(f"[WhisperService] Model idle for {int(idle_time)}s, unloading to free memory...")
+            app_logger.info(f"[WhisperService] Model idle for {int(idle_time)}s, unloading to free memory...")
             self.unload_model()
     
     def unload_model(self):
@@ -237,7 +243,11 @@ class WhisperService:
         if self.model is not None:
             del self.model
             self.model = None
-            print("[WhisperService] Model unloaded")
+            import gc
+            # Multiple passes to ensure circular references are fully cleared
+            for _ in range(3):
+                gc.collect()
+            app_logger.info("[WhisperService] Model unloaded & GC collected aggressively")
 
 
 # ============================================================================

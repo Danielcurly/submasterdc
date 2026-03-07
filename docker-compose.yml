@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   submasterdc:
-    image: ghcr.io/danielcurly/submasterdc:latest
+    image: ghcr.io/danielcurly/submasterdc:v1.0.2
     container_name: submasterdc
     environment:
       - PUID=1026
